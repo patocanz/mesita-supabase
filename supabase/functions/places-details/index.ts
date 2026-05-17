@@ -5,7 +5,7 @@
 // added here, not on the client.
 //
 // JWT-protected: clients must send the Supabase anon JWT in `Authorization`.
-// Reads the Google key from the secret `google_places_api_key`.
+// Reads the Google key from the secret `GOOGLE_MAPS_PLATFORM_API_KEY`.
 //
 // Local:  supabase functions serve places-details
 // Deploy: supabase functions deploy places-details
@@ -68,10 +68,10 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  const apiKey = Deno.env.get("google_places_api_key");
+  const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_API_KEY");
   if (!apiKey) {
     return jsonResponse(
-      { ok: false, error: "Server missing google_places_api_key secret" },
+      { ok: false, error: "Server missing GOOGLE_MAPS_PLATFORM_API_KEY secret" },
       500,
     );
   }
