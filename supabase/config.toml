@@ -83,3 +83,23 @@ verify_jwt = true
 
 [functions.places-details]
 verify_jwt = true
+
+# Venue catalog reads. Public — guests can browse without an account; the
+# venues RLS policy enforces which statuses are visible.
+[functions.venues-list]
+verify_jwt = false
+
+# Venue creation. JWT-protected. Receives a Google placeId, enriches via
+# Places + Firecrawl + Perplexity + OpenAI in one pass, writes via service
+# role. Self-contained — does NOT call other Edge Functions.
+[functions.venues-enrich-create]
+verify_jwt = true
+
+# Venue update. JWT-protected; the function itself verifies that the caller
+# is a member of the venue before mutating any column.
+[functions.venues-update]
+verify_jwt = true
+
+# Manager-scoped venue read. JWT-protected.
+[functions.venues-mine]
+verify_jwt = true
