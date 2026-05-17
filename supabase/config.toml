@@ -70,3 +70,8 @@ s3_host = "env(S3_HOST)"
 s3_region = "env(S3_REGION)"
 s3_access_key = "env(S3_ACCESS_KEY)"
 s3_secret_key = "env(S3_SECRET_KEY)"
+
+# Per-function overrides — keeps GitHub auto-deploys honest about which
+# functions are public vs. JWT-protected.
+[functions.hello-world]
+verify_jwt = false
