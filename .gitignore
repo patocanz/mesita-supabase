@@ -1,0 +1,20 @@
+# Supabase
+.branches
+.temp
+.env
+.env.local
+.env.*.local
+
+# Deno
+.deno/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
