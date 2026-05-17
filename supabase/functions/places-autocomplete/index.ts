@@ -71,7 +71,6 @@ Deno.serve(async (req) => {
           "cafe",
           "bakery",
           "night_club",
-          "food",
         ],
       }),
     });
