@@ -75,3 +75,11 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # functions are public vs. JWT-protected.
 [functions.hello-world]
 verify_jwt = false
+
+# Google Places proxies. Reads google_places_api_key secret server-side
+# and returns shape-normalised JSON to the web client.
+[functions.places-autocomplete]
+verify_jwt = true
+
+[functions.places-details]
+verify_jwt = true

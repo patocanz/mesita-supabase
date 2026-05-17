@@ -1,8 +1,9 @@
 // Supabase Edge Function — hello-world
-// Smoke test for the deploy pipeline. Returns a JSON greeting.
+// Public smoke test. verify_jwt = false so the new sb_publishable_... key
+// (passed via apikey header) is enough; no signed-in user required.
 //
-// Local:  supabase functions serve hello-world
-// Deploy: supabase functions deploy hello-world
+// Local:  supabase functions serve hello-world --no-verify-jwt
+// Deploy: supabase functions deploy hello-world --no-verify-jwt
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
