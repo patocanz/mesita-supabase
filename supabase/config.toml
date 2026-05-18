@@ -103,3 +103,21 @@ verify_jwt = true
 # Manager-scoped venue read. JWT-protected.
 [functions.venues-mine]
 verify_jwt = true
+
+# Guest profile (creates the guest row on first call + returns balance + code).
+[functions.guest-profile]
+verify_jwt = true
+
+# Ticket workflow. JWT-protected; each function does its own membership check
+# and writes via the service role. Self-contained — no Edge-to-Edge calls.
+[functions.tickets-venue-create]
+verify_jwt = true
+
+[functions.tickets-mark-paid]
+verify_jwt = true
+
+[functions.tickets-mine]
+verify_jwt = true
+
+[functions.tickets-venue-recent]
+verify_jwt = true
