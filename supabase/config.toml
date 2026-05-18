@@ -156,3 +156,13 @@ verify_jwt = true
 # On formal flows that were awaiting_story, approve credits cashback now.
 [functions.manager-verify-story]
 verify_jwt = true
+
+# Manager profile (creates the manager row on first call, mirrors email
+# from auth.users).
+[functions.manager-profile]
+verify_jwt = true
+
+# Manager writes their own profile (full_name, phone). Auto-creates the
+# row on first call so onboarding works before manager-profile runs.
+[functions.manager-update-profile]
+verify_jwt = true

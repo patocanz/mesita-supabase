@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
   // Read once. If absent, insert with a generated code and re-read.
   const existing = await admin
     .from("guests")
-    .select("id, code, full_name, phone, cashback_balance_cents")
+    .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
     .eq("id", userId)
     .maybeSingle();
   if (existing.error) {
@@ -69,7 +69,7 @@ Deno.serve(async (req) => {
       const inserted = await admin
         .from("guests")
         .insert({ id: userId, code: codeResult.data as string })
-        .select("id, code, full_name, phone, cashback_balance_cents")
+        .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
         .single();
       if (!inserted.error) {
         guest = inserted.data;
@@ -93,7 +93,7 @@ Deno.serve(async (req) => {
       .from("guests")
       .update({ code: codeResult.data as string })
       .eq("id", userId)
-      .select("id, code, full_name, phone, cashback_balance_cents")
+      .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
       .single();
     if (updated.error) {
       return json({ ok: false, error: `guest_code_set: ${updated.error.message}` }, 500);
