@@ -79,10 +79,13 @@ Deno.serve(async (req) => {
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
   const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const GOOGLE_KEY = Deno.env.get("GOOGLE_MAPS_PLATFORM_API_KEY");
-  const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_SUPABASE_API_KEY");
-  const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_SUPABASE_API_KEY");
-  const OPENAI_KEY = Deno.env.get("OPENAI_SUPABASE_API_KEY");
+  // Third-party secrets follow the `<VENDOR>_SUPABASE_KEY` convention —
+  // no PLATFORM, no API. Audience is SUPABASE (server-only); browser keys
+  // use `NEXT_PUBLIC_<VENDOR>_BROWSER_KEY` and live on Vercel.
+  const GOOGLE_KEY = Deno.env.get("GOOGLE_MAPS_SUPABASE_KEY");
+  const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_SUPABASE_KEY");
+  const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_SUPABASE_KEY");
+  const OPENAI_KEY = Deno.env.get("OPENAI_SUPABASE_KEY");
 
   if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY || !GOOGLE_KEY) {
     return json({ ok: false, error: "Server misconfigured (missing core secrets)" }, 500);
@@ -519,7 +522,7 @@ type SynthOutput = {
 };
 
 async function synthesiseVenue(input: SynthInput, apiKey: string | undefined): Promise<SynthOutput> {
-  if (!apiKey) return synthFallback(input, "no OPENAI_SUPABASE_API_KEY");
+  if (!apiKey) return synthFallback(input, "no OPENAI_SUPABASE_KEY");
 
   const prompt = [
     "You are normalising a venue for the Mesita catalog. Output STRICT JSON only, no markdown.",

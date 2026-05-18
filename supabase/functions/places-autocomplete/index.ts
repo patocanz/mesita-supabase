@@ -1,8 +1,13 @@
 // Supabase Edge Function — places-autocomplete
 //
 // Proxies Google Places API (New) Autocomplete so the Google key never
-// leaves Supabase. The key is read from the secret `GOOGLE_MAPS_PLATFORM_API_KEY`
+// leaves Supabase. The key is read from the secret `GOOGLE_MAPS_SUPABASE_KEY`
 // (set via Dashboard → Edge Functions → Secrets, or `supabase secrets set`).
+//
+// Naming convention for third-party keys: `<VENDOR>_<AUDIENCE>_KEY`.
+//   - `<AUDIENCE>` is SUPABASE when the key lives in Supabase secrets
+//     (server-only) or BROWSER when it lives in Vercel as NEXT_PUBLIC_*.
+//   - No `PLATFORM`, no `API` — both are redundant.
 //
 // JWT-protected: clients must send the Supabase anon JWT in `Authorization`.
 //
@@ -35,13 +40,13 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_API_KEY");
+  const apiKey = Deno.env.get("GOOGLE_MAPS_SUPABASE_KEY");
   if (!apiKey) {
     return jsonResponse({
       ok: false,
       code: "server_missing_key",
       error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_PLATFORM_API_KEY.",
+        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_SUPABASE_KEY.",
     });
   }
 
