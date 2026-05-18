@@ -28,6 +28,12 @@ type UpdateBody = {
   price_level?: number | null;
   status?: "active" | "paused" | "archived";
   fiscal_type?: "formal" | "informal";
+  plan?:
+    | "free"
+    | "formal_pro"
+    | "formal_ultra"
+    | "informal_pro"
+    | "informal_ultra";
   address?: string | null;
   closes_at?: string | null;
   phone?: string | null;
@@ -143,6 +149,51 @@ Deno.serve(async (req) => {
     }
     update.fiscal_type = f;
   }
+  if ("plan" in body) {
+    const p = body.plan;
+    const validPlans = new Set([
+      "free",
+      "formal_pro",
+      "formal_ultra",
+      "informal_pro",
+      "informal_ultra",
+    ]);
+    if (!p || !validPlans.has(p)) {
+      return json(
+        {
+          ok: false,
+          error: "plan must be one of free | formal_pro | formal_ultra | informal_pro | informal_ultra",
+        },
+        400,
+      );
+    }
+    // Mechanic-fiscal coupling: a formal plan only makes sense on a formal
+    // venue, and vice versa. We look up the current row to validate against
+    // the venue's fiscal_type (or the new fiscal_type the same request is
+    // trying to set, whichever wins).
+    const incomingFiscal = (update.fiscal_type as string | undefined) ?? null;
+    if (p.startsWith("formal_") && incomingFiscal === "informal") {
+      return json(
+        {
+          ok: false,
+          code: "plan_fiscal_mismatch",
+          error: "Formal plans can't be picked while the venue is set to informal. Change fiscal_type first.",
+        },
+        409,
+      );
+    }
+    if (p.startsWith("informal_") && incomingFiscal === "formal") {
+      return json(
+        {
+          ok: false,
+          code: "plan_fiscal_mismatch",
+          error: "Informal plans can't be picked while the venue is set to formal. Change fiscal_type first.",
+        },
+        409,
+      );
+    }
+    update.plan = p;
+  }
   if ("address" in body) update.address = optString(body.address, 300);
   if ("closes_at" in body) {
     const raw = optString(body.closes_at, 5);
@@ -192,7 +243,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
     )
     .single();
   if (updateError) {
