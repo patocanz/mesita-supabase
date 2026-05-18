@@ -100,7 +100,14 @@ verify_jwt = true
 [functions.venues-update]
 verify_jwt = true
 
-# Manager-scoped venue read. JWT-protected.
+# One-shot bundle for the manager + validator surfaces: user + venues +
+# active venue + recent tickets. Replaces multiple per-page calls so
+# sidebar navigation is a single Edge Function round trip.
+[functions.unit-overview]
+verify_jwt = true
+
+# Manager-scoped venue read. Kept for non-manager surfaces that still need
+# a venue list without the heavy join.
 [functions.venues-mine]
 verify_jwt = true
 
