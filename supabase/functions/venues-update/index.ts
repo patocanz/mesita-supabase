@@ -34,7 +34,30 @@ type UpdateBody = {
   story?: string | null;
   cashback_percent?: number | null;
   photos?: string[];
+  // External + social channels
+  website_url?: string | null;
+  instagram_url?: string | null;
+  tiktok_url?: string | null;
+  facebook_url?: string | null;
+  whatsapp_url?: string | null;
+  opentable_url?: string | null;
+  resy_url?: string | null;
+  uber_eats_url?: string | null;
+  rappi_url?: string | null;
 };
+
+const URL_FIELDS = [
+  "website_url",
+  "instagram_url",
+  "tiktok_url",
+  "facebook_url",
+  "whatsapp_url",
+  "opentable_url",
+  "resy_url",
+  "uber_eats_url",
+  "rappi_url",
+] as const;
+type UrlField = (typeof URL_FIELDS)[number];
 
 const EDITABLE_STATUSES = new Set(["active", "paused", "archived"]);
 
@@ -124,6 +147,20 @@ Deno.serve(async (req) => {
     }
     const clean = body.photos.filter(isUrl).slice(0, MAX_PHOTOS);
     update.photos = clean;
+  }
+
+  // External + social URLs — each optional, each validated to https://.
+  for (const field of URL_FIELDS) {
+    if (!(field in body)) continue;
+    const raw = body[field as UrlField];
+    if (raw == null || (typeof raw === "string" && raw.trim() === "")) {
+      update[field] = null;
+      continue;
+    }
+    if (!isUrl(raw)) {
+      return json({ ok: false, error: `${field} must be a valid https:// URL` }, 400);
+    }
+    update[field] = raw.trim();
   }
 
   if (Object.keys(update).length === 0) {
