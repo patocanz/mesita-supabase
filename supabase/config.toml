@@ -141,3 +141,8 @@ verify_jwt = true
 
 [functions.manager-cancel-ticket]
 verify_jwt = true
+
+# Guest writes their own onboarding details (name, sex, birthday, country,
+# phone). Auto-creates the guest row on first call.
+[functions.guest-update-profile]
+verify_jwt = true
