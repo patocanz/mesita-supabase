@@ -132,21 +132,13 @@ Deno.serve(async (req) => {
   const needsEmbed = candidates.filter(shouldEmbed).slice(0, LAZY_EMBED_BATCH);
   let embeddedCount = 0;
   if (needsEmbed.length > 0 && OPENAI_KEY) {
-    embeddedCount = await embedAndPersist(needsEmbed, admin, OPENAI_KEY);
-    if (embeddedCount > 0) {
-      const refreshed = await admin
-        .from("venues")
-        .select("id, embedding, embedding_source_hash")
-        .in("id", needsEmbed.map((v) => v.id));
-      const byId = new Map(
-        (refreshed.data ?? []).map((r) => [r.id as string, r as { embedding: unknown; embedding_source_hash: string }]),
-      );
-      for (const c of candidates) {
-        const r = byId.get(c.id);
-        if (r) {
-          c.embedding = r.embedding;
-          c.embedding_source_hash = r.embedding_source_hash;
-        }
+    const patched = await embedAndPersist(needsEmbed, admin, OPENAI_KEY);
+    embeddedCount = patched.size;
+    for (const c of candidates) {
+      const p = patched.get(c.id);
+      if (p) {
+        c.embedding = p.embedding;
+        c.embedding_source_hash = p.hash;
       }
     }
   }
@@ -449,16 +441,19 @@ function shouldEmbed(v: VenueRow): boolean {
   return v.embedding_source_hash == null;
 }
 
+// Returns a map of venue.id → { embedding, hash } for every row that was
+// successfully embedded + persisted. The caller patches local rows from
+// this map so we never need a re-SELECT after writing.
 async function embedAndPersist(
   rows: VenueRow[],
   admin: ReturnType<typeof createClient>,
   apiKey: string,
-): Promise<number> {
-  const inputs = await Promise.all(rows.map(async (r) => ({
-    id: r.id,
-    text: venueSourceText(r),
-    hash: await digest(venueSourceText(r)),
-  })));
+): Promise<Map<string, { embedding: number[]; hash: string }>> {
+  const inputs = await Promise.all(rows.map(async (r) => {
+    const text = venueSourceText(r);
+    return { id: r.id, text, hash: await digest(text) };
+  }));
+  const out = new Map<string, { embedding: number[]; hash: string }>();
   try {
     const r = await fetch("https://api.openai.com/v1/embeddings", {
       method: "POST",
@@ -473,28 +468,32 @@ async function embedAndPersist(
     });
     if (!r.ok) {
       console.error("[guest-build-catalog] batch-embed HTTP", r.status, (await r.text()).slice(0, 240));
-      return 0;
+      return out;
     }
     const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
-    const vecs = data.data ?? [];
-    let wrote = 0;
-    for (let i = 0; i < inputs.length; i += 1) {
-      const v = vecs.find((d) => d.index === i)?.embedding;
-      if (!v || v.length !== EMBEDDING_DIMS) continue;
+    const byIdx = new Map<number, number[]>();
+    for (const d of data.data ?? []) byIdx.set(d.index, d.embedding);
+
+    await Promise.all(inputs.map(async (inp, i) => {
+      const v = byIdx.get(i);
+      if (!v || v.length !== EMBEDDING_DIMS) return;
       const { error } = await admin
         .from("venues")
         .update({
           embedding: vectorLiteral(v),
-          embedding_source_hash: inputs[i].hash,
+          embedding_source_hash: inp.hash,
         })
-        .eq("id", inputs[i].id);
-      if (!error) wrote += 1;
-      else console.error("[guest-build-catalog] embed write:", error.message);
-    }
-    return wrote;
+        .eq("id", inp.id);
+      if (error) {
+        console.error("[guest-build-catalog] embed write:", error.message);
+        return;
+      }
+      out.set(inp.id, { embedding: v, hash: inp.hash });
+    }));
+    return out;
   } catch (err) {
     console.error("[guest-build-catalog] embed exception:", err);
-    return 0;
+    return out;
   }
 }
 
@@ -522,12 +521,14 @@ function cosineSim(a: number[], b: number[]): number {
 }
 
 function parseVector(v: unknown): number[] | null {
+  // Fast path: pgvector via supabase-js may arrive already typed when the
+  // row was patched locally from our embed call. Avoids the split + parse.
   if (Array.isArray(v)) return v as number[];
   if (typeof v !== "string") return null;
-  const inner = v.replace(/^\[/, "").replace(/\]$/, "");
+  const inner = v.slice(v.startsWith("[") ? 1 : 0, v.endsWith("]") ? -1 : undefined);
   if (!inner) return null;
-  const arr = inner.split(",").map((s) => Number(s.trim()));
-  if (arr.some((n) => !Number.isFinite(n))) return null;
+  const arr = inner.split(",").map((s) => Number(s));
+  for (const n of arr) if (!Number.isFinite(n)) return null;
   return arr;
 }
 
