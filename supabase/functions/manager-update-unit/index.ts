@@ -51,6 +51,15 @@ type UpdateBody = {
   resy_url?: string | null;
   uber_eats_url?: string | null;
   rappi_url?: string | null;
+  x_url?: string | null;
+  youtube_url?: string | null;
+  threads_url?: string | null;
+  reddit_url?: string | null;
+  didi_food_url?: string | null;
+  tripadvisor_url?: string | null;
+  google_maps_url?: string | null;
+  // Plain contact (not URL-shaped)
+  email?: string | null;
 };
 
 const URL_FIELDS = [
@@ -63,6 +72,13 @@ const URL_FIELDS = [
   "resy_url",
   "uber_eats_url",
   "rappi_url",
+  "x_url",
+  "youtube_url",
+  "threads_url",
+  "reddit_url",
+  "didi_food_url",
+  "tripadvisor_url",
+  "google_maps_url",
 ] as const;
 type UrlField = (typeof URL_FIELDS)[number];
 
@@ -234,6 +250,26 @@ Deno.serve(async (req) => {
     update[field] = raw.trim();
   }
 
+  // Email: not a URL. Just trim + sanity-check the shape (has @ and a dot
+  // after it). Empty / null clears the field.
+  if ("email" in body) {
+    const raw = body.email;
+    if (raw == null || (typeof raw === "string" && raw.trim() === "")) {
+      update.email = null;
+    } else if (typeof raw !== "string") {
+      return json({ ok: false, error: "email must be a string" }, 400);
+    } else {
+      const trimmed = raw.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+        return json({ ok: false, error: "email must look like name@domain.tld" }, 400);
+      }
+      if (trimmed.length > 254) {
+        return json({ ok: false, error: "email too long" }, 400);
+      }
+      update.email = trimmed.toLowerCase();
+    }
+  }
+
   if (Object.keys(update).length === 0) {
     return json({ ok: false, error: "No editable fields provided" }, 400);
   }
@@ -243,7 +279,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, email, created_at, updated_at",
     )
     .single();
   if (updateError) {

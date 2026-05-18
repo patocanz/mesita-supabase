@@ -153,6 +153,19 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ── Channel extraction ──
+  // Walk every outbound link we can collect (Google's websiteUri +
+  // googleMapsUri, plus the Firecrawl links[] array) and classify each by
+  // hostname into one of our flat channel columns. Best-effort — anything
+  // that doesn't match a known host is dropped. Email is pulled separately
+  // from the Firecrawl markdown with a regex.
+  const channels = classifyLinks([
+    details.websiteUri,
+    details.googleMapsUri,
+    ...(firecrawl?.links ?? []),
+  ]);
+  const email = extractEmailFromMarkdown(firecrawl?.markdown ?? null);
+
   // ── Step 3: OpenAI synthesis (optional — falls back to heuristics) ──
   const synth = await synthesiseVenue(
     {
@@ -215,6 +228,27 @@ Deno.serve(async (req) => {
     cashback_percent: 10,
     photos: photoUrls,
     google_place_id: details.id ?? placeId,
+    // Every channel below is best-effort and may be null. classifyLinks
+    // picks the shortest matching URL per host so we land profile roots
+    // instead of post-deep-links; email comes from a regex over the
+    // scraped homepage markdown.
+    website_url: channels.website_url,
+    instagram_url: channels.instagram_url,
+    facebook_url: channels.facebook_url,
+    tiktok_url: channels.tiktok_url,
+    x_url: channels.x_url,
+    youtube_url: channels.youtube_url,
+    threads_url: channels.threads_url,
+    reddit_url: channels.reddit_url,
+    whatsapp_url: channels.whatsapp_url,
+    opentable_url: channels.opentable_url,
+    resy_url: channels.resy_url,
+    uber_eats_url: channels.uber_eats_url,
+    rappi_url: channels.rappi_url,
+    didi_food_url: channels.didi_food_url,
+    tripadvisor_url: channels.tripadvisor_url,
+    google_maps_url: channels.google_maps_url,
+    email,
   };
 
   const { data: venue, error: venueError } = await admin
@@ -280,6 +314,8 @@ Deno.serve(async (req) => {
         perplexity: !!perplexity?.brief,
         openai: synth.source === "openai",
         openaiError: synth.synthError,
+        channelCount:
+          Object.values(channels).filter((v) => !!v).length + (email ? 1 : 0),
       },
     },
     201,
@@ -355,6 +391,165 @@ function isSocialUrl(u: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Channel classification
+// ───────────────────────────────────────────────────────────────────────────
+
+type ChannelKey =
+  | "website_url"
+  | "instagram_url"
+  | "facebook_url"
+  | "tiktok_url"
+  | "x_url"
+  | "youtube_url"
+  | "threads_url"
+  | "reddit_url"
+  | "whatsapp_url"
+  | "opentable_url"
+  | "resy_url"
+  | "uber_eats_url"
+  | "rappi_url"
+  | "didi_food_url"
+  | "tripadvisor_url"
+  | "google_maps_url";
+
+type Channels = Record<ChannelKey, string | null>;
+
+// Hostname → channel column. The matcher accepts both exact hostnames and
+// subdomain matches (`m.facebook.com` resolves to `facebook_url`). The
+// `tripadvisor` and `didi` rules are intentionally loose because the TLD
+// varies by country (`.com`, `.com.mx`, `.es`, `.com.ar`).
+function matchChannel(host: string): ChannelKey | null {
+  const h = host.replace(/^www\./, "").toLowerCase();
+  if (h === "instagram.com" || h.endsWith(".instagram.com")) return "instagram_url";
+  if (h === "facebook.com" || h.endsWith(".facebook.com")) return "facebook_url";
+  if (h === "fb.com" || h.endsWith(".fb.com")) return "facebook_url";
+  if (h === "tiktok.com" || h.endsWith(".tiktok.com")) return "tiktok_url";
+  if (h === "twitter.com" || h.endsWith(".twitter.com")) return "x_url";
+  if (h === "x.com" || h.endsWith(".x.com")) return "x_url";
+  if (h === "youtube.com" || h.endsWith(".youtube.com")) return "youtube_url";
+  if (h === "youtu.be") return "youtube_url";
+  if (h === "threads.net" || h.endsWith(".threads.net")) return "threads_url";
+  if (h === "threads.com" || h.endsWith(".threads.com")) return "threads_url";
+  if (h === "reddit.com" || h.endsWith(".reddit.com")) return "reddit_url";
+  if (h === "wa.me" || h.endsWith(".wa.me")) return "whatsapp_url";
+  if (h === "whatsapp.com" || h.endsWith(".whatsapp.com")) return "whatsapp_url";
+  if (h.startsWith("opentable.")) return "opentable_url";
+  if (h === "resy.com" || h.endsWith(".resy.com")) return "resy_url";
+  if (h === "ubereats.com" || h.endsWith(".ubereats.com")) return "uber_eats_url";
+  if (h === "rappi.com" || h.endsWith(".rappi.com")) return "rappi_url";
+  if (h.startsWith("rappi.com.")) return "rappi_url";
+  if (h === "didi.com" || h.endsWith(".didi.com")) return "didi_food_url";
+  if (h.startsWith("didifood.")) return "didi_food_url";
+  if (h === "sindelantal.com.mx" || h.endsWith(".sindelantal.com.mx")) return "didi_food_url";
+  if (h.startsWith("tripadvisor.")) return "tripadvisor_url";
+  if (h === "google.com/maps" || h === "maps.google.com" || h.endsWith(".google.com/maps"))
+    return "google_maps_url";
+  if (h === "maps.app.goo.gl" || h === "goo.gl") return "google_maps_url";
+  return null;
+}
+
+// Trim tracking junk + trailing slashes so two near-identical links from
+// the same host collapse to one before we pick the shortest.
+function canonicaliseUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    // Strip noisy query params; keep anything that looks meaningful.
+    const drop = ["ref", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid"];
+    drop.forEach((k) => u.searchParams.delete(k));
+    // Drop fragment — never identifies a profile root.
+    u.hash = "";
+    // Drop trailing slash on pathname so /casaluminar/ ≡ /casaluminar.
+    if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
+      u.pathname = u.pathname.slice(0, -1);
+    }
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function classifyLinks(input: (string | null | undefined)[]): Channels {
+  const buckets: Partial<Record<ChannelKey, string[]>> = {};
+  // The non-social website also needs a home — googleMapsUri / websiteUri
+  // come in here too. We treat anything classified as `google_maps_url` /
+  // `instagram_url` / etc. through matchChannel, and anything that isn't
+  // a known channel host but DOES look like a real website gets to fight
+  // for the `website_url` slot.
+  const websiteCandidates: string[] = [];
+
+  for (const raw of input) {
+    if (!raw) continue;
+    const url = canonicaliseUrl(raw);
+    if (!url) continue;
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      continue;
+    }
+    const channel = matchChannel(host);
+    if (channel) {
+      (buckets[channel] ??= []).push(url);
+    } else {
+      websiteCandidates.push(url);
+    }
+  }
+
+  // Pick the shortest URL per channel — heuristic for "profile root over
+  // deep link". Ties are broken by the first occurrence (which preserves
+  // Google-provided URIs over Firecrawl-scraped ones).
+  const pickShortest = (arr: string[] | undefined): string | null => {
+    if (!arr || arr.length === 0) return null;
+    let best = arr[0];
+    for (const v of arr) {
+      if (v.length < best.length) best = v;
+    }
+    return best;
+  };
+
+  const result: Channels = {
+    website_url: pickShortest(websiteCandidates),
+    instagram_url: pickShortest(buckets.instagram_url),
+    facebook_url: pickShortest(buckets.facebook_url),
+    tiktok_url: pickShortest(buckets.tiktok_url),
+    x_url: pickShortest(buckets.x_url),
+    youtube_url: pickShortest(buckets.youtube_url),
+    threads_url: pickShortest(buckets.threads_url),
+    reddit_url: pickShortest(buckets.reddit_url),
+    whatsapp_url: pickShortest(buckets.whatsapp_url),
+    opentable_url: pickShortest(buckets.opentable_url),
+    resy_url: pickShortest(buckets.resy_url),
+    uber_eats_url: pickShortest(buckets.uber_eats_url),
+    rappi_url: pickShortest(buckets.rappi_url),
+    didi_food_url: pickShortest(buckets.didi_food_url),
+    tripadvisor_url: pickShortest(buckets.tripadvisor_url),
+    google_maps_url: pickShortest(buckets.google_maps_url),
+  };
+  return result;
+}
+
+// One regex over the Firecrawl markdown. Skip obvious noise (no-reply,
+// example.com, sentry / image-host garbage). Anything else — including
+// gmail addresses — is fine; small venues often run on gmail.
+function extractEmailFromMarkdown(md: string | null): string | null {
+  if (!md) return null;
+  const re = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(md)) !== null) {
+    const email = m[0].toLowerCase();
+    if (email.startsWith("noreply@")) continue;
+    if (email.startsWith("no-reply@")) continue;
+    if (email.endsWith("@example.com")) continue;
+    if (email.endsWith("@sentry.io")) continue;
+    if (email.endsWith("@wixpress.com")) continue;
+    if (email.endsWith("@wordpress.com")) continue;
+    return email;
+  }
+  return null;
 }
 
 function extractImagesFromMarkdown(md: string): string[] {
