@@ -157,12 +157,19 @@ verify_jwt = true
 [functions.manager-verify-story]
 verify_jwt = true
 
-# Manager profile (creates the manager row on first call, mirrors email
-# from auth.users).
+# Manager profile read. Naming follows caller-verb-words.
+[functions.manager-get-profile]
+verify_jwt = true
+
+# Manager onboard write — creates the manager_profile row.
+[functions.manager-create-profile]
+verify_jwt = true
+
+# Deprecated aliases of the two above. Left registered so any client that
+# still calls the old name keeps working through one deploy cycle.
+# Remove once Vercel has shipped the renamed client.
 [functions.manager-profile]
 verify_jwt = true
 
-# Manager writes their own profile (full_name, phone). Auto-creates the
-# row on first call so onboarding works before manager-profile runs.
 [functions.manager-update-profile]
 verify_jwt = true
