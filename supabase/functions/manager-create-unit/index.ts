@@ -48,6 +48,39 @@ const MAX_PHOTOS = 20;
 
 type EnrichBody = { placeId?: string };
 
+// Google's regularOpeningHours.periods shape. `day` is 0..6 with Sunday = 0
+// (matches JS Date.getDay()). A "24/7" venue returns a single period with an
+// `open` but no `close`. Overnight ranges show up as open.day = N, close.day
+// = N+1, which is what weeklyHoursFromPeriods has to handle.
+type GooglePeriod = {
+  open?: { day?: number; hour?: number; minute?: number };
+  close?: { day?: number; hour?: number; minute?: number };
+};
+
+// Persisted shape for venues.hours (jsonb). Lowercase English day keys;
+// closed days are simply omitted. Multiple ranges per day cover split
+// shifts (lunch + dinner). Overnight ranges are clipped at 23:59 on the
+// open day and resumed at 00:00 on the close day, so each entry is a same-
+// day pair that's trivial to render.
+type WeeklyHours = Partial<Record<DayKey, { open: string; close: string }[]>>;
+type DayKey =
+  | "sunday"
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday";
+const DAY_KEYS: DayKey[] = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+];
+
 type GoogleDetails = {
   id?: string;
   displayName?: { text?: string };
@@ -62,8 +95,8 @@ type GoogleDetails = {
   rating?: number;
   userRatingCount?: number;
   websiteUri?: string;
-  regularOpeningHours?: { weekdayDescriptions?: string[]; periods?: unknown[] };
-  currentOpeningHours?: { weekdayDescriptions?: string[]; periods?: unknown[] };
+  regularOpeningHours?: { weekdayDescriptions?: string[]; periods?: GooglePeriod[] };
+  currentOpeningHours?: { weekdayDescriptions?: string[]; periods?: GooglePeriod[] };
   priceLevel?: string;
   businessStatus?: string;
   editorialSummary?: { text?: string };
@@ -116,6 +149,34 @@ Deno.serve(async (req) => {
   const placeId = (body.placeId ?? "").toString().trim();
   if (!placeId) return json({ ok: false, error: "placeId is required" }, 400);
 
+  // ── Pre-flight dedupe ────────────────────────────────────────────────
+  // Cheap SELECT before we spend Google + Firecrawl + Perplexity + OpenAI
+  // quota on a venue that's already been onboarded. The insert below still
+  // catches the race (unique constraint on google_place_id) — this is just
+  // an optimisation for the common "manager clicks twice" case. Service
+  // role: RLS would hide pending_review / paused / archived rows from the
+  // anon path and we want to detect them all.
+  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: existingByPlaceId } = await admin
+    .from("venues")
+    .select("id, slug, name, status, listing_type")
+    .eq("google_place_id", placeId)
+    .maybeSingle();
+  if (existingByPlaceId) {
+    return json(
+      {
+        ok: false,
+        code: "venue_already_exists",
+        error:
+          "This venue is already on Mesita. If you manage it, contact support to claim ownership.",
+        existing: existingByPlaceId,
+      },
+      409,
+    );
+  }
+
   // ── Step 1: Google Places details (blocking — everything else needs it) ──
   const details = await fetchGoogleDetails(placeId, GOOGLE_KEY);
   if ("error" in details) {
@@ -131,14 +192,16 @@ Deno.serve(async (req) => {
   const address = details.formattedAddress ?? null;
 
   // ── Step 2: Parallel enrichment (best-effort, all may individually fail) ──
-  const [photosResult, firecrawlResult, perplexityResult] = await Promise.allSettled([
+  const [photosResult, firecrawlResult, perplexityResult, timezoneResult] = await Promise.allSettled([
     fetchGooglePhotos(details.photos ?? [], MAX_PHOTOS, GOOGLE_KEY),
     fetchFirecrawl(details.websiteUri, FIRECRAWL_KEY),
     fetchPerplexity(venueName, city, country, details.primaryTypeDisplayName?.text ?? null, PERPLEXITY_KEY),
+    fetchTimezone(details.location?.latitude, details.location?.longitude, GOOGLE_KEY),
   ]);
   const googlePhotos = photosResult.status === "fulfilled" ? photosResult.value : [];
   const firecrawl = firecrawlResult.status === "fulfilled" ? firecrawlResult.value : null;
   const perplexity = perplexityResult.status === "fulfilled" ? perplexityResult.value : null;
+  const timezone = timezoneResult.status === "fulfilled" ? timezoneResult.value : null;
 
   // Google caps the Places response at 10 photos. Supplement from the
   // scraped website until we hit MAX_PHOTOS.
@@ -191,9 +254,8 @@ Deno.serve(async (req) => {
   );
 
   // ── Step 4: Persist (service role; RLS allows reads only) ──
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  // `admin` was already instantiated above for the pre-flight placeId
+  // dedupe — reuse the same client for writes.
 
   const { error: managerError } = await admin
     .from("managers")
@@ -209,19 +271,31 @@ Deno.serve(async (req) => {
   const closesAt =
     synth.closes_at ?? closesAtFromHours(details.regularOpeningHours?.weekdayDescriptions ?? []);
 
+  // Normalised weekly schedule for venues.hours (jsonb). Built from Google's
+  // regularOpeningHours.periods; null when the place is permanently closed
+  // or Google has no hours data.
+  const hours = weeklyHoursFromPeriods(details.regularOpeningHours?.periods);
+
   const insertRow = {
     name: synth.name || venueName,
     slug,
     category: synth.category ?? details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
     vibe: synth.vibe ?? null,
     price_level: synth.price_level ?? priceLevelFromGoogle(details.priceLevel),
-    listing_type: "partner" as const,
-    status: "active" as const,
+    // Defaults are deliberately conservative: the caller proved nothing
+    // beyond "I have a Google placeId", so the venue lands hidden from the
+    // public catalog (RLS read filter is status in ('active','lead')) and
+    // ineligible for ticket creation (manager-create-ticket gates on
+    // listing_type = 'partner'). Operations / the manager-claim flow flips
+    // these once the caller is verified as the venue's operator.
+    listing_type: "unclaimed" as const,
+    status: "pending_review" as const,
     lat: details.location?.latitude ?? null,
     lng: details.location?.longitude ?? null,
     address,
-    timezone: null,
+    timezone,
     closes_at: closesAt,
+    hours,
     phone: details.nationalPhoneNumber ?? details.internationalPhoneNumber ?? null,
     pitch: synth.pitch ?? details.editorialSummary?.text ?? null,
     story: synth.story ?? details.generativeSummary?.overview?.text ?? null,
@@ -364,6 +438,34 @@ async function fetchGooglePhotos(
   return settled
     .filter((s): s is PromiseFulfilledResult<{ photoUri: string }> => s.status === "fulfilled")
     .map((s) => s.value);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Google Time Zone API
+// ───────────────────────────────────────────────────────────────────────────
+
+// Returns an IANA tz id (e.g. "America/Monterrey") for the venue's lat/lng,
+// or null on any failure. Uses the same Google key as Places — needs the
+// "Time Zone API" enabled on the project (separate enable from Places).
+// `timestamp` is required by Google but only matters for DST resolution; we
+// pass "now" since we only consume timeZoneId.
+async function fetchTimezone(
+  lat: number | undefined,
+  lng: number | undefined,
+  apiKey: string,
+): Promise<string | null> {
+  if (typeof lat !== "number" || typeof lng !== "number") return null;
+  try {
+    const ts = Math.floor(Date.now() / 1000);
+    const url = `https://maps.googleapis.com/maps/api/timezone/json?location=${lat},${lng}&timestamp=${ts}&key=${apiKey}`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = (await r.json()) as { status?: string; timeZoneId?: string };
+    if (d.status !== "OK") return null;
+    return d.timeZoneId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -839,6 +941,67 @@ function priceLevelFromGoogle(p?: string): number | null {
     default:
       return null;
   }
+}
+
+function weeklyHoursFromPeriods(periods: GooglePeriod[] | undefined): WeeklyHours | null {
+  if (!periods || periods.length === 0) return null;
+  const out: WeeklyHours = {};
+
+  // 24/7 venues come back as a single period with `open` only, day=0, hour=0.
+  // Mirror that as every day 00:00→23:59 so consumers don't special-case.
+  if (
+    periods.length === 1 &&
+    periods[0].open &&
+    !periods[0].close &&
+    (periods[0].open.hour ?? 0) === 0 &&
+    (periods[0].open.minute ?? 0) === 0
+  ) {
+    for (const day of DAY_KEYS) {
+      out[day] = [{ open: "00:00", close: "23:59" }];
+    }
+    return out;
+  }
+
+  for (const p of periods) {
+    const oDay = p.open?.day;
+    if (typeof oDay !== "number" || oDay < 0 || oDay > 6) continue;
+    const openStr = hhmm(p.open?.hour, p.open?.minute);
+    if (!openStr) continue;
+
+    // No close → open-ended; record start only with a placeholder close.
+    if (!p.close) {
+      pushRange(out, DAY_KEYS[oDay], openStr, "23:59");
+      continue;
+    }
+
+    const cDay = p.close.day;
+    const closeStr = hhmm(p.close.hour, p.close.minute);
+    if (typeof cDay !== "number" || !closeStr) continue;
+
+    if (cDay === oDay) {
+      pushRange(out, DAY_KEYS[oDay], openStr, closeStr);
+    } else {
+      // Overnight: split into open-day 23:59 + close-day 00:00 → close.
+      // Mesita's UI shows hours per weekday, and a Friday 6pm–2am venue
+      // should appear under Friday 18:00–23:59 AND Saturday 00:00–02:00.
+      pushRange(out, DAY_KEYS[oDay], openStr, "23:59");
+      if (closeStr !== "00:00") {
+        pushRange(out, DAY_KEYS[cDay], "00:00", closeStr);
+      }
+    }
+  }
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function hhmm(hour: number | undefined, minute: number | undefined): string | null {
+  if (typeof hour !== "number" || hour < 0 || hour > 23) return null;
+  const m = typeof minute === "number" && minute >= 0 && minute <= 59 ? minute : 0;
+  return `${String(hour).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function pushRange(hours: WeeklyHours, day: DayKey, open: string, close: string): void {
+  (hours[day] ??= []).push({ open, close });
 }
 
 function closesAtFromHours(weekdayDescriptions: string[]): string | null {
