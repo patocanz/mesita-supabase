@@ -27,6 +27,7 @@ type UpdateBody = {
   vibe?: string | null;
   price_level?: number | null;
   status?: "active" | "paused" | "archived";
+  fiscal_type?: "formal" | "informal";
   address?: string | null;
   closes_at?: string | null;
   phone?: string | null;
@@ -132,6 +133,16 @@ Deno.serve(async (req) => {
     }
     update.status = s;
   }
+  if ("fiscal_type" in body) {
+    const f = body.fiscal_type;
+    if (f !== "formal" && f !== "informal") {
+      return json(
+        { ok: false, error: "fiscal_type must be 'formal' or 'informal'" },
+        400,
+      );
+    }
+    update.fiscal_type = f;
+  }
   if ("address" in body) update.address = optString(body.address, 300);
   if ("closes_at" in body) {
     const raw = optString(body.closes_at, 5);
@@ -181,7 +192,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
     )
     .single();
   if (updateError) {

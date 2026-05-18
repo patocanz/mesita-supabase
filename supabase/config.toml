@@ -146,3 +146,13 @@ verify_jwt = true
 # phone). Auto-creates the guest row on first call.
 [functions.guest-update-profile]
 verify_jwt = true
+
+# Guest uploads the URL of their Instagram-story screenshot for a
+# story-required ticket. Feeds the verification queue.
+[functions.guest-submit-story]
+verify_jwt = true
+
+# Waiter (or AI-fallback escalation) approves/rejects a story screenshot.
+# On formal flows that were awaiting_story, approve credits cashback now.
+[functions.manager-verify-story]
+verify_jwt = true

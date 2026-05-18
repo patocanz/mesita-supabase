@@ -20,7 +20,7 @@ const CORS = {
 };
 
 const VENUE_COLUMNS =
-  "id, slug, name, category, vibe, price_level, listing_type, status, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at";
+  "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at";
 
 type Body = { activeUnitId?: string; ticketsLimit?: number };
 
@@ -94,7 +94,7 @@ Deno.serve(async (req) => {
     const tx = await admin
       .from("tickets")
       .select(
-        "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, currency, created_at, paid_at, cancelled_at, cancel_reason, guest:guests(id, code, full_name)",
+        "id, kind, status, story_status, story_screenshot_url, story_submitted_at, story_verified_at, story_reject_reason, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, discount_percent, discount_cents, revealed_at, reservation_status, reservation_at, reservation_party_size, currency, created_at, paid_at, cancelled_at, cancel_reason, guest:guests(id, code, full_name)",
       )
       .eq("venue_id", activeId)
       .order("created_at", { ascending: false })

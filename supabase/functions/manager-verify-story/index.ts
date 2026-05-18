@@ -1,28 +1,34 @@
-// Supabase Edge Function — tickets-mark-paid
+// Supabase Edge Function — manager-verify-story
 //
-// Authenticated. Transitions a FORMAL ticket from 'pending_pay' to either
-// 'paid' (cashback can land now) or 'awaiting_story' (paid but story still
-// needs verification). The function also runs the redemption + earn ledger
-// rows when cashback is ready to credit.
+// Authenticated. The waiter (or AI-fallback escalation) approves or rejects
+// a guest's Instagram-story screenshot.
 //
-// Story gating:
-//   - kinds with a story step (s_p_sf_c, r_s_p_sf_c) only credit cashback
-//     when story_status is already verified (ai_verified or waiter_verified).
-//     If the story is still pending/submitted/ai_rejected, the ticket
-//     moves to 'awaiting_story' and the credit happens later via
-//     manager-verify-story.
-//   - kinds without a story step (p_c, r_p_c) credit cashback immediately
-//     on mark-paid.
+// Inputs:
+//   ticketId    — uuid of the ticket
+//   decision    — 'approve' | 'reject'
+//   reason      — optional, only relevant on reject (≤240 chars)
 //
-// Informal kinds are rejected here — they don't go through Mesita's
-// payment rail, the discount has already been applied at the bill.
+// Behaviour by fiscal flow:
 //
-// Authorisation: either a venue_member of the ticket's venue OR the
-// ticket's guest can call this. (In v0 the validator marks paid manually;
-// once a Stripe webhook is wired up that webhook becomes the trusted
-// caller and this function becomes the shared write path.)
+//   Formal (s_p_sf_c, r_s_p_sf_c)
+//     approve →
+//       If ticket is in 'awaiting_story' (paid but cashback gated), credit
+//       the cashback NOW: redeem first, earn second, single balance write,
+//       and flip status to 'paid'.
+//       If ticket is still 'pending_pay', just flip story_status; cashback
+//       lands later when tickets-mark-paid runs.
+//     reject →
+//       Story-fallback waiter rejected. Cashback NEVER lands. If still
+//       'awaiting_story' we flip to 'paid' (the payment itself happened)
+//       but with story_status='waiter_rejected' so the ledger stays empty.
 //
-// Self-contained: own auth, own DB writes via service role, no Edge-to-Edge.
+//   Informal (s_dp_sf, r_s_dp_sf)
+//     The discount was already applied at the bill before this call. This
+//     function only records the verification outcome — there's no money
+//     to credit or claw back. The "vulnerability" flag is exactly this:
+//     reject is informational only.
+//
+// Self-contained: own auth, own DB writes, no function-to-function calls.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -34,11 +40,14 @@ const CORS = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const FORMAL_KINDS = new Set(["p_c", "s_p_sf_c", "r_p_c", "r_s_p_sf_c"]);
-const STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
-const STORY_VERIFIED = new Set(["ai_verified", "waiter_verified"]);
+const FORMAL_STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
+const INFORMAL_STORY_KINDS = new Set(["s_dp_sf", "r_s_dp_sf"]);
 
-type Body = { ticketId?: string };
+type Body = {
+  ticketId?: string;
+  decision?: "approve" | "reject";
+  reason?: string;
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -74,6 +83,14 @@ Deno.serve(async (req) => {
   }
   const ticketId = (body.ticketId ?? "").toString().trim();
   if (!ticketId) return json({ ok: false, error: "ticketId is required" }, 400);
+  const decision = body.decision;
+  if (decision !== "approve" && decision !== "reject") {
+    return json(
+      { ok: false, error: "decision must be 'approve' or 'reject'" },
+      400,
+    );
+  }
+  const reason = (body.reason ?? "").toString().trim().slice(0, 240) || null;
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -82,7 +99,7 @@ Deno.serve(async (req) => {
   const ticketRow = await admin
     .from("tickets")
     .select(
-      "id, venue_id, guest_id, kind, status, story_status, total_cents, cashback_cents, cashback_percent, redeem_cents, paid_at",
+      "id, venue_id, guest_id, kind, status, story_status, cashback_cents, redeem_cents",
     )
     .eq("id", ticketId)
     .maybeSingle();
@@ -95,65 +112,73 @@ Deno.serve(async (req) => {
   if (!ticketRow.data) return json({ ok: false, error: "Ticket not found" }, 404);
   const ticket = ticketRow.data;
 
-  if (!FORMAL_KINDS.has(ticket.kind)) {
+  const isFormal = FORMAL_STORY_KINDS.has(ticket.kind);
+  const isInformal = INFORMAL_STORY_KINDS.has(ticket.kind);
+  if (!isFormal && !isInformal) {
     return json(
       {
         ok: false,
-        error:
-          "tickets-mark-paid is for formal/cashback flows only. Informal tickets settle off-rail.",
+        error: `Ticket kind ${ticket.kind} has no story step to verify.`,
       },
       409,
     );
   }
 
-  // Authorisation: venue member OR the ticket's guest.
-  let authorised = ticket.guest_id === userId;
-  if (!authorised) {
-    const membership = await admin
-      .from("venue_members")
-      .select("role")
-      .eq("venue_id", ticket.venue_id)
-      .eq("manager_id", userId)
-      .maybeSingle();
-    if (membership.error) {
-      return json(
-        { ok: false, error: `membership: ${membership.error.message}` },
-        500,
-      );
-    }
-    authorised = !!membership.data;
-  }
-  if (!authorised) {
-    return json({ ok: false, error: "Not authorised for this ticket" }, 403);
-  }
-
-  // Idempotency: 'paid' and 'awaiting_story' are both post-payment states.
-  if (ticket.status === "paid") {
-    return json({ ok: true, ticket, alreadyPaid: true });
-  }
-  if (ticket.status === "awaiting_story") {
-    // Already paid, just waiting on story. No-op; surface that to the caller.
-    return json({ ok: true, ticket, alreadyPaid: true, awaitingStory: true });
-  }
-  if (ticket.status !== "pending_pay") {
+  // Membership: the waiter who verifies must belong to the ticket's venue.
+  const membership = await admin
+    .from("venue_members")
+    .select("role")
+    .eq("venue_id", ticket.venue_id)
+    .eq("manager_id", userId)
+    .maybeSingle();
+  if (membership.error) {
     return json(
-      { ok: false, error: `Cannot mark ${ticket.status} ticket as paid` },
-      409,
+      { ok: false, error: `membership: ${membership.error.message}` },
+      500,
     );
   }
+  if (!membership.data) {
+    return json({ ok: false, error: "Not a member of this venue" }, 403);
+  }
 
-  const paidAt = new Date().toISOString();
-  const storyRequired = STORY_KINDS.has(ticket.kind);
-  const storyOk = STORY_VERIFIED.has(ticket.story_status);
-  const nextStatus = storyRequired && !storyOk ? "awaiting_story" : "paid";
+  // Story-status guard: once we've moved to a terminal verified/rejected
+  // state we don't re-process. Idempotent re-submission returns the row.
+  if (
+    ticket.story_status === "waiter_verified" ||
+    ticket.story_status === "waiter_rejected"
+  ) {
+    return json({ ok: true, ticket, alreadyDecided: true });
+  }
+  // We allow verifying from any non-terminal state — pending, submitted, or
+  // ai_rejected — because the waiter is the fallback for all of them.
 
-  // Optimistic guard: only update if we're still in pending_pay.
+  const verifiedAt = new Date().toISOString();
+  const nextStoryStatus = decision === "approve"
+    ? "waiter_verified"
+    : "waiter_rejected";
+
+  // Decide if the ticket's overall status moves too. Only the formal
+  // awaiting_story case flips here (to 'paid').
+  const moveTicketStatusToPaid =
+    isFormal && ticket.status === "awaiting_story";
+
+  const patch: Record<string, unknown> = {
+    story_status: nextStoryStatus,
+    story_verified_at: verifiedAt,
+    story_verified_by: userId,
+    story_reject_reason: decision === "reject" ? reason : null,
+  };
+  if (moveTicketStatusToPaid) {
+    patch.status = "paid";
+  }
+
   const updated = await admin
     .from("tickets")
-    .update({ status: nextStatus, paid_at: paidAt })
+    .update(patch)
     .eq("id", ticketId)
-    .eq("status", "pending_pay")
-    .select("id, status, paid_at, cashback_cents, story_status")
+    .select(
+      "id, kind, status, story_status, story_verified_at, story_reject_reason, cashback_cents, redeem_cents",
+    )
     .single();
   if (updated.error) {
     return json(
@@ -162,22 +187,41 @@ Deno.serve(async (req) => {
     );
   }
 
-  // If the cashback is gated by story verification, stop here. The credit
-  // will run later inside manager-verify-story.
-  if (nextStatus === "awaiting_story") {
+  // Informal flows: discount was applied at the bill — nothing to credit.
+  if (isInformal) {
     return json({
       ok: true,
       ticket: updated.data,
       cashbackCreditedCents: 0,
       cashbackRedeemedCents: 0,
       guestBalanceAfterCents: null,
-      awaitingStory: true,
     });
   }
 
-  // Cashback is ready to credit. Apply redemption FIRST (debit) then earn
-  // (credit), with a single balance write at the end. The ledger rows are
-  // append-only so we can read the trail later.
+  // Formal approve: if we moved the ticket from awaiting_story → paid, the
+  // cashback ledger has to run now (it didn't run during mark-paid).
+  if (!moveTicketStatusToPaid) {
+    return json({
+      ok: true,
+      ticket: updated.data,
+      cashbackCreditedCents: 0,
+      cashbackRedeemedCents: 0,
+      guestBalanceAfterCents: null,
+    });
+  }
+  if (decision === "reject") {
+    // Story rejected post-payment. The ticket is now 'paid' but cashback
+    // never lands. No ledger rows, no balance change.
+    return json({
+      ok: true,
+      ticket: updated.data,
+      cashbackCreditedCents: 0,
+      cashbackRedeemedCents: 0,
+      guestBalanceAfterCents: null,
+    });
+  }
+
+  // Approve + awaiting_story → run the ledger.
   const cashbackCents = ticket.cashback_cents ?? 0;
   const redeemCents = ticket.redeem_cents ?? 0;
 
@@ -196,13 +240,11 @@ Deno.serve(async (req) => {
 
   if (redeemCents > 0) {
     if (redeemCents > balance) {
-      // Concurrent redemption elsewhere shrank the balance. Refuse so the
-      // ledger never goes negative.
       return json(
         {
           ok: false,
           code: "redeem_exceeds_balance",
-          error: `Guest balance dropped below the ${redeemCents} cents this ticket would redeem.`,
+          error: `Guest balance is below the ${redeemCents} cents this ticket would redeem.`,
         },
         409,
       );
@@ -264,7 +306,6 @@ Deno.serve(async (req) => {
     cashbackCreditedCents: cashbackCents,
     cashbackRedeemedCents: redeemCents,
     guestBalanceAfterCents: balance,
-    awaitingStory: false,
   });
 });
 
