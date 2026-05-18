@@ -60,36 +60,44 @@ type GoogleDetails = {
 
 type Body = { placeId?: string; sessionToken?: string };
 
+// See places-autocomplete for the rationale: this function always returns
+// HTTP 200, even on Google failures. supabase-js's `functions.invoke`
+// swallows the response body on non-2xx, so we keep the wire status at 200
+// and rely on the `{ ok, error }` shape so the real Google error reaches
+// the client.
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: CORS_HEADERS });
   }
   if (req.method !== "POST") {
-    return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
+    return jsonResponse({ ok: false, error: "Method not allowed" });
   }
 
   const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_API_KEY");
   if (!apiKey) {
-    return jsonResponse(
-      { ok: false, error: "Server missing GOOGLE_MAPS_PLATFORM_API_KEY secret" },
-      500,
-    );
+    return jsonResponse({
+      ok: false,
+      code: "server_missing_key",
+      error:
+        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_PLATFORM_API_KEY.",
+    });
   }
 
   let body: Body = {};
   try {
     body = (await req.json()) as Body;
   } catch {
-    return jsonResponse({ ok: false, error: "Invalid JSON" }, 400);
+    return jsonResponse({ ok: false, error: "Invalid JSON" });
   }
 
   const placeId = (body.placeId ?? "").toString();
   const sessionToken = (body.sessionToken ?? "").toString();
   if (!placeId) {
-    return jsonResponse({ ok: false, error: "Missing placeId" }, 400);
+    return jsonResponse({ ok: false, error: "Missing placeId" });
   }
   if (!sessionToken) {
-    return jsonResponse({ ok: false, error: "Missing sessionToken" }, 400);
+    return jsonResponse({ ok: false, error: "Missing sessionToken" });
   }
 
   try {
@@ -105,10 +113,13 @@ Deno.serve(async (req) => {
 
     if (!r.ok) {
       const text = await r.text();
-      return jsonResponse(
-        { ok: false, error: `Google ${r.status}: ${text.slice(0, 240)}` },
-        502,
-      );
+      const code = classifyGoogleError(r.status, text);
+      return jsonResponse({
+        ok: false,
+        code,
+        error: friendlyGoogleError(code, r.status, text),
+        httpStatus: r.status,
+      });
     }
 
     const data = (await r.json()) as GoogleDetails;
@@ -119,9 +130,50 @@ Deno.serve(async (req) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({ ok: false, error: message }, 502);
+    return jsonResponse({
+      ok: false,
+      code: "network_error",
+      error: `Couldn't reach Google: ${message}`,
+    });
   }
 });
+
+function classifyGoogleError(status: number, body: string): string {
+  if (status === 403) {
+    if (/referer|referrer/i.test(body)) return "google_referrer_blocked";
+    if (/api.+disabled|not.+enabled/i.test(body)) return "google_api_disabled";
+    if (/quota|exceeded/i.test(body)) return "google_quota_exceeded";
+    return "google_permission_denied";
+  }
+  if (status === 400) return "google_bad_request";
+  if (status === 404) return "google_not_found";
+  if (status === 429) return "google_rate_limited";
+  if (status >= 500) return "google_unavailable";
+  return "google_error";
+}
+
+function friendlyGoogleError(code: string, status: number, body: string): string {
+  switch (code) {
+    case "google_referrer_blocked":
+      return "Google rejected the request — the API key has a referrer / IP restriction blocking server-to-server calls. Remove the HTTP-referrer restriction on the Mesita backend key.";
+    case "google_api_disabled":
+      return "Google Places API (New) isn't enabled on the configured key. Enable it in Google Cloud → APIs & Services.";
+    case "google_quota_exceeded":
+      return "The Google Places quota for today is exhausted. Try again later or raise the daily cap.";
+    case "google_permission_denied":
+      return "Google denied the request (permission). Check the API key + billing.";
+    case "google_bad_request":
+      return `Google rejected the lookup: ${body.slice(0, 200)}`;
+    case "google_not_found":
+      return "Google can't find that venue anymore — pick a different result.";
+    case "google_rate_limited":
+      return "Too many lookups in a short window. Wait a few seconds and try again.";
+    case "google_unavailable":
+      return "Google Places is unavailable right now (5xx). Try again in a moment.";
+    default:
+      return `Google ${status}: ${body.slice(0, 200)}`;
+  }
+}
 
 function normalise(placeId: string, d: GoogleDetails) {
   const find = (type: string) =>
@@ -166,9 +218,10 @@ function priceLevelFromString(p: string | undefined): 1 | 2 | 3 | 4 | null {
   }
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+function jsonResponse(body: unknown): Response {
+  // Always 200 on the wire — see top-of-file comment.
   return new Response(JSON.stringify(body), {
-    status,
+    status: 200,
     headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
   });
 }
