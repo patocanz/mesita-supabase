@@ -89,6 +89,10 @@ verify_jwt = true
 [functions.venues-list]
 verify_jwt = false
 
+# Single-venue detail read. Public; same RLS gate as venues-list.
+[functions.guest-get-venue]
+verify_jwt = false
+
 # Venue creation. JWT-protected. Receives a Google placeId, enriches via
 # Places + Firecrawl + Perplexity + OpenAI in one pass, writes via service
 # role. Self-contained — does NOT call other Edge Functions.

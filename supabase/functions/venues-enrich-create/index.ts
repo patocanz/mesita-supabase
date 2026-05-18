@@ -220,6 +220,36 @@ Deno.serve(async (req) => {
     .select("id, slug, name, status")
     .single();
   if (venueError) {
+    // Unique-violation on google_place_id → already onboarded by someone.
+    if (venueError.code === "23505" && /google_place_id/.test(venueError.message)) {
+      const existing = await admin
+        .from("venues")
+        .select("id, slug, name, status, listing_type")
+        .eq("google_place_id", details.id ?? placeId)
+        .maybeSingle();
+      return json(
+        {
+          ok: false,
+          code: "venue_already_exists",
+          error:
+            "This venue is already on Mesita. If you manage it, contact support to claim ownership.",
+          existing: existing.data ?? null,
+        },
+        409,
+      );
+    }
+    // Unique-violation on slug → very likely two venues with the same name.
+    if (venueError.code === "23505" && /\bslug\b/.test(venueError.message)) {
+      return json(
+        {
+          ok: false,
+          code: "slug_already_taken",
+          error:
+            "A venue with this URL slug already exists. Try renaming slightly or contact support.",
+        },
+        409,
+      );
+    }
     return json(
       { ok: false, error: `venue_insert: ${venueError.message}`, code: venueError.code ?? null },
       400,
