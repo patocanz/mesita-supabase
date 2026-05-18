@@ -133,7 +133,16 @@ Deno.serve(async (req) => {
     update.status = s;
   }
   if ("address" in body) update.address = optString(body.address, 300);
-  if ("closes_at" in body) update.closes_at = optString(body.closes_at, 5);
+  if ("closes_at" in body) {
+    const raw = optString(body.closes_at, 5);
+    if (raw != null && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(raw)) {
+      return json(
+        { ok: false, error: "closes_at must be 24h HH:MM (e.g. 02:00)" },
+        400,
+      );
+    }
+    update.closes_at = raw;
+  }
   if ("phone" in body) update.phone = optString(body.phone, 40);
   if ("pitch" in body) update.pitch = optString(body.pitch, 200);
   if ("story" in body) update.story = optString(body.story, 1500);
@@ -172,7 +181,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, created_at, updated_at",
     )
     .single();
   if (updateError) {
