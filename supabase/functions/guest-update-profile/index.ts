@@ -3,7 +3,7 @@
 // Authenticated. The guest writes their own onboarding details (name, sex,
 // birthday, country, phone). Auto-creates the guest row on first call so
 // onboarding works even if the user hasn't hit /qr yet to trigger
-// guest-profile's lazy create.
+// guest-get-profile's lazy create.
 //
 // Self-contained: own JWT verification, own DB writes via the service role.
 

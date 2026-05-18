@@ -1,4 +1,4 @@
-// Supabase Edge Function — places-autocomplete
+// Supabase Edge Function — manager-suggest-places
 //
 // Proxies Google Places API (New) Autocomplete so the Google key never
 // leaves Supabase. The key is read from the secret

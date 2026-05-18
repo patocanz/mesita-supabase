@@ -1,4 +1,4 @@
-// Supabase Edge Function — guest-profile
+// Supabase Edge Function — guest-get-profile
 //
 // Authenticated. Returns the caller's guest profile, creating it on first
 // call (with a stable short `code` used by validators to scan/identify the

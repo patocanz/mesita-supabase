@@ -1,11 +1,11 @@
-// Supabase Edge Function — venues-mine
+// Supabase Edge Function — manager-list-units
 //
 // Authenticated. Returns every venue the caller is a member of, regardless
 // of status (so paused / archived rows are visible to the owner). Self-
 // contained: own auth check, own DB query; never calls other Edge Functions.
 //
-// Local:  supabase functions serve venues-mine
-// Deploy: supabase functions deploy venues-mine
+// Local:  supabase functions serve manager-list-units
+// Deploy: supabase functions deploy manager-list-units
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";

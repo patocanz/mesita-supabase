@@ -1,4 +1,4 @@
-// Supabase Edge Function — manager-lookup-guest
+// Supabase Edge Function — manager-find-guest
 //
 // Authenticated. A validator (any venue_member) looks up a guest by the
 // 6-char code on their QR. Returns the guest's display name + current

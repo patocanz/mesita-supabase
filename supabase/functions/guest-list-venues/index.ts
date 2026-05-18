@@ -1,10 +1,10 @@
-// Supabase Edge Function — venues-list
+// Supabase Edge Function — guest-list-venues
 //
 // Public endpoint. Returns venues that are visible to guests
 // (status in 'active', 'lead'). Self-contained: no calls to other functions.
 //
-// Local:  supabase functions serve venues-list
-// Deploy: supabase functions deploy venues-list
+// Local:  supabase functions serve guest-list-venues
+// Deploy: supabase functions deploy guest-list-venues
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";

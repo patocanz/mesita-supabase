@@ -1,4 +1,4 @@
-// Supabase Edge Function — places-details
+// Supabase Edge Function — manager-get-place
 //
 // Fetches a full Google Place by id. Field-mask is intentionally tight to
 // keep the per-call cost down; anything extra we want from Google should be
@@ -6,10 +6,10 @@
 //
 // JWT-protected: clients must send the Supabase anon JWT in `Authorization`.
 // Reads the Google key from the secret `GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY`.
-// (See places-autocomplete for the naming convention.)
+// (See manager-suggest-places for the naming convention.)
 //
-// Local:  supabase functions serve places-details
-// Deploy: supabase functions deploy places-details
+// Local:  supabase functions serve manager-get-place
+// Deploy: supabase functions deploy manager-get-place
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -61,7 +61,7 @@ type GoogleDetails = {
 
 type Body = { placeId?: string; sessionToken?: string };
 
-// See places-autocomplete for the rationale: this function always returns
+// See manager-suggest-places for the rationale: this function always returns
 // HTTP 200, even on Google failures. supabase-js's `functions.invoke`
 // swallows the response body on non-2xx, so we keep the wire status at 200
 // and rely on the `{ ok, error }` shape so the real Google error reaches

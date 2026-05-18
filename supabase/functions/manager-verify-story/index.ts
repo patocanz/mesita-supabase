@@ -16,7 +16,7 @@
 //       the cashback NOW: redeem first, earn second, single balance write,
 //       and flip status to 'paid'.
 //       If ticket is still 'pending_pay', just flip story_status; cashback
-//       lands later when tickets-mark-paid runs.
+//       lands later when manager-mark-paid runs.
 //     reject →
 //       Story-fallback waiter rejected. Cashback NEVER lands. If still
 //       'awaiting_story' we flip to 'paid' (the payment itself happened)

@@ -1,4 +1,4 @@
-// Supabase Edge Function — tickets-mark-paid
+// Supabase Edge Function — manager-mark-paid
 //
 // Authenticated. Transitions a FORMAL ticket from 'pending_pay' to either
 // 'paid' (cashback can land now) or 'awaiting_story' (paid but story still
@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
       {
         ok: false,
         error:
-          "tickets-mark-paid is for formal/cashback flows only. Informal tickets settle off-rail.",
+          "manager-mark-paid is for formal/cashback flows only. Informal tickets settle off-rail.",
       },
       409,
     );

@@ -1,4 +1,4 @@
-// Supabase Edge Function — venues-enrich-create
+// Supabase Edge Function — manager-create-unit
 //
 // Single self-contained workflow. The signed-in manager passes a Google
 // Places `placeId`; this function enriches the venue from Google Places +
@@ -6,8 +6,8 @@
 // catalog row with OpenAI, then writes venues + venue_members via service
 // role. NO calls to other Edge Functions.
 //
-// Local:  supabase functions serve venues-enrich-create
-// Deploy: supabase functions deploy venues-enrich-create
+// Local:  supabase functions serve manager-create-unit
+// Deploy: supabase functions deploy manager-create-unit
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -565,7 +565,7 @@ async function synthesiseVenue(input: SynthInput, apiKey: string | undefined): P
     });
     if (!r.ok) {
       const errText = (await r.text()).slice(0, 240);
-      console.error("[venues-enrich-create] openai HTTP", r.status, errText);
+      console.error("[manager-create-unit] openai HTTP", r.status, errText);
       return synthFallback(input, `openai_http_${r.status}: ${errText}`);
     }
     const data = (await r.json()) as {
@@ -577,7 +577,7 @@ async function synthesiseVenue(input: SynthInput, apiKey: string | undefined): P
       parsed = JSON.parse(content) as Partial<SynthOutput>;
     } catch (e) {
       const msg = e instanceof Error ? e.message : "parse error";
-      console.error("[venues-enrich-create] openai parse", msg, content.slice(0, 200));
+      console.error("[manager-create-unit] openai parse", msg, content.slice(0, 200));
       return synthFallback(input, `openai_parse: ${msg}`);
     }
     return {
@@ -594,7 +594,7 @@ async function synthesiseVenue(input: SynthInput, apiKey: string | undefined): P
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "openai exception";
-    console.error("[venues-enrich-create] openai exception", msg);
+    console.error("[manager-create-unit] openai exception", msg);
     return synthFallback(input, `openai_exception: ${msg}`);
   }
 }

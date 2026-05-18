@@ -71,105 +71,78 @@ s3_region = "env(S3_REGION)"
 s3_access_key = "env(S3_ACCESS_KEY)"
 s3_secret_key = "env(S3_SECRET_KEY)"
 
-# Per-function overrides — keeps GitHub auto-deploys honest about which
-# functions are public vs. JWT-protected.
-[functions.hello-world]
+# Per-function overrides. Naming rule: who-verb-nouns (e.g. manager-create-unit,
+# guest-list-tickets). All functions verify the JWT except the truly public
+# catalog reads, which rely on RLS to gate visibility instead.
+#
+# --- Guest (public reads + authed writes) ---
+
+# Public catalog reads. RLS enforces which venue statuses are visible.
+[functions.guest-list-venues]
 verify_jwt = false
 
-# Google Places proxies. Reads google_places_api_key secret server-side
-# and returns shape-normalised JSON to the web client.
-[functions.places-autocomplete]
-verify_jwt = true
-
-[functions.places-details]
-verify_jwt = true
-
-# Venue catalog reads. Public — guests can browse without an account; the
-# venues RLS policy enforces which statuses are visible.
-[functions.venues-list]
-verify_jwt = false
-
-# Single-venue detail read. Public; same RLS gate as venues-list.
 [functions.guest-get-venue]
 verify_jwt = false
 
-# Venue creation. JWT-protected. Receives a Google placeId, enriches via
-# Places + Firecrawl + Perplexity + OpenAI in one pass, writes via service
-# role. Self-contained — does NOT call other Edge Functions.
-[functions.venues-enrich-create]
+# Authed guest writes / reads tied to the signed-in guest's own data.
+[functions.guest-get-profile]
 verify_jwt = true
 
-# Venue update. JWT-protected; the function itself verifies that the caller
-# is a member of the venue before mutating any column.
-[functions.venues-update]
+[functions.guest-update-profile]
 verify_jwt = true
 
-# One-shot bundle for the manager + validator surfaces: user + venues +
-# active venue + recent tickets. Replaces multiple per-page calls so
-# sidebar navigation is a single Edge Function round trip.
-[functions.unit-overview]
+[functions.guest-list-tickets]
 verify_jwt = true
 
-# Manager-scoped venue read. Kept for non-manager surfaces that still need
-# a venue list without the heavy join.
-[functions.venues-mine]
+[functions.guest-submit-story]
 verify_jwt = true
 
-# Guest profile (creates the guest row on first call + returns balance + code).
-[functions.guest-profile]
+# --- Manager (all authed) ---
+
+# Identity
+[functions.manager-get-profile]
 verify_jwt = true
 
-# Ticket workflow. JWT-protected; each function does its own membership check
-# and writes via the service role. Self-contained — no Edge-to-Edge calls.
-[functions.tickets-venue-create]
+[functions.manager-create-profile]
 verify_jwt = true
 
-[functions.tickets-mark-paid]
+# Unit (venue) lifecycle
+[functions.manager-list-units]
 verify_jwt = true
 
-[functions.tickets-mine]
+[functions.manager-create-unit]
 verify_jwt = true
 
-[functions.tickets-venue-recent]
+[functions.manager-update-unit]
 verify_jwt = true
 
-# Manager utilities (new <caller>-<verb>-<noun> naming convention).
-# manager-lookup-guest: resolve a 6-char guest code to display name + balance.
-# manager-cancel-ticket: cancel a pending_pay ticket with a reason.
-[functions.manager-lookup-guest]
+# One-shot dashboard bundle: user + venues + active venue + recent tickets.
+[functions.manager-get-overview]
+verify_jwt = true
+
+# Ticket workflow
+[functions.manager-create-ticket]
+verify_jwt = true
+
+[functions.manager-list-tickets]
+verify_jwt = true
+
+[functions.manager-mark-paid]
 verify_jwt = true
 
 [functions.manager-cancel-ticket]
 verify_jwt = true
 
-# Guest writes their own onboarding details (name, sex, birthday, country,
-# phone). Auto-creates the guest row on first call.
-[functions.guest-update-profile]
-verify_jwt = true
-
-# Guest uploads the URL of their Instagram-story screenshot for a
-# story-required ticket. Feeds the verification queue.
-[functions.guest-submit-story]
-verify_jwt = true
-
-# Waiter (or AI-fallback escalation) approves/rejects a story screenshot.
-# On formal flows that were awaiting_story, approve credits cashback now.
 [functions.manager-verify-story]
 verify_jwt = true
 
-# Manager profile read. Naming follows caller-verb-words.
-[functions.manager-get-profile]
+# Guest lookup at the table (resolve 6-char code → name + balance).
+[functions.manager-find-guest]
 verify_jwt = true
 
-# Manager onboard write — creates the manager_profile row.
-[functions.manager-create-profile]
+# Google Places proxies. Keep the platform key server-side.
+[functions.manager-suggest-places]
 verify_jwt = true
 
-# Deprecated aliases of the two above. Left registered so any client that
-# still calls the old name keeps working through one deploy cycle.
-# Remove once Vercel has shipped the renamed client.
-[functions.manager-profile]
-verify_jwt = true
-
-[functions.manager-update-profile]
+[functions.manager-get-place]
 verify_jwt = true

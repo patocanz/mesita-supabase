@@ -1,4 +1,4 @@
-// Supabase Edge Function — unit-overview
+// Supabase Edge Function — manager-get-overview
 //
 // Authenticated. Returns *everything* the manager / validator surfaces
 // need for the active unit in one round trip:
@@ -102,7 +102,7 @@ Deno.serve(async (req) => {
     if (tx.error) {
       // Don't fail the whole overview if tickets fail — surface as empty list
       // with an error breadcrumb the client can log.
-      console.error("[unit-overview] ticket fetch:", tx.error.message);
+      console.error("[manager-get-overview] ticket fetch:", tx.error.message);
     } else {
       recentTickets = tx.data ?? [];
     }

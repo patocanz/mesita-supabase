@@ -1,12 +1,12 @@
-// Supabase Edge Function — venues-update
+// Supabase Edge Function — manager-update-unit
 //
 // Authenticated. Updates editable fields on a venue the caller owns or
 // manages. Self-contained: verifies the JWT, checks venue_members membership
 // itself, validates input, writes via service role. Does NOT call any other
 // Edge Function.
 //
-// Local:  supabase functions serve venues-update
-// Deploy: supabase functions deploy venues-update
+// Local:  supabase functions serve manager-update-unit
+// Deploy: supabase functions deploy manager-update-unit
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";

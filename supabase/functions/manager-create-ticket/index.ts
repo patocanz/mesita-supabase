@@ -1,4 +1,4 @@
-// Supabase Edge Function — tickets-venue-create
+// Supabase Edge Function — manager-create-ticket
 //
 // Authenticated. The waiter / validator opens a ticket against a guest at
 // their venue. The body specifies which of the 10 ticket flows is being
