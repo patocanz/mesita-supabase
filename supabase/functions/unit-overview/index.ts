@@ -94,7 +94,7 @@ Deno.serve(async (req) => {
     const tx = await admin
       .from("tickets")
       .select(
-        "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, currency, created_at, paid_at, guest:guests(id, code, full_name)",
+        "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, currency, created_at, paid_at, cancelled_at, cancel_reason, guest:guests(id, code, full_name)",
       )
       .eq("venue_id", activeId)
       .order("created_at", { ascending: false })

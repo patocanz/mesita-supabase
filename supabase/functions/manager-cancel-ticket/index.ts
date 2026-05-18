@@ -1,23 +1,23 @@
-// Supabase Edge Function — tickets-venue-recent
+// Supabase Edge Function — manager-cancel-ticket
 //
-// Authenticated. Returns the most recent tickets for a venue the caller is
-// a member of. Joins the guest's display fields (code, full name) for the
-// validator UI. Self-contained.
+// Authenticated. Validator cancels a pending_pay ticket they opened by
+// mistake (wrong total, guest left without paying, etc.). Only the
+// venue's members can cancel. Paid tickets cannot be cancelled — those
+// need an explicit refund flow (out of scope for now).
+//
+// Self-contained: own auth check, own DB writes via service role.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
 
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 100;
-
-type Body = { venueId?: string; limit?: number };
+type Body = { ticketId?: string; reason?: string };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -49,21 +49,29 @@ Deno.serve(async (req) => {
   } catch {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
-  const venueId = (body.venueId ?? "").toString().trim();
-  if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  const limit = Math.max(
-    1,
-    Math.min(MAX_LIMIT, Math.trunc(Number(body.limit ?? DEFAULT_LIMIT))),
-  );
+  const ticketId = (body.ticketId ?? "").toString().trim();
+  if (!ticketId) return json({ ok: false, error: "ticketId is required" }, 400);
+  const reason = (body.reason ?? "").toString().trim().slice(0, 240) || null;
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
+  const ticket = await admin
+    .from("tickets")
+    .select("id, venue_id, status")
+    .eq("id", ticketId)
+    .maybeSingle();
+  if (ticket.error) {
+    return json({ ok: false, error: `ticket_lookup: ${ticket.error.message}` }, 500);
+  }
+  if (!ticket.data) return json({ ok: false, error: "Ticket not found" }, 404);
+
+  // Validator must be a member of the venue.
   const membership = await admin
     .from("venue_members")
     .select("role")
-    .eq("venue_id", venueId)
+    .eq("venue_id", ticket.data.venue_id)
     .eq("manager_id", userId)
     .maybeSingle();
   if (membership.error) {
@@ -73,20 +81,29 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Not a member of this venue" }, 403);
   }
 
-  const { data, error } = await admin
-    .from("tickets")
-    .select(
-      "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, currency, created_at, paid_at, cancelled_at, cancel_reason, guest:guests(id, code, full_name)",
-    )
-    .eq("venue_id", venueId)
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
-  if (error) {
-    return json({ ok: false, error: error.message }, 500);
+  if (ticket.data.status === "cancelled") {
+    return json({ ok: true, alreadyCancelled: true });
+  }
+  if (ticket.data.status !== "pending_pay") {
+    return json(
+      { ok: false, error: `Cannot cancel a ${ticket.data.status} ticket` },
+      409,
+    );
   }
 
-  return json({ ok: true, tickets: data ?? [] });
+  const cancelledAt = new Date().toISOString();
+  const update = await admin
+    .from("tickets")
+    .update({ status: "cancelled", cancelled_at: cancelledAt, cancel_reason: reason })
+    .eq("id", ticketId)
+    .eq("status", "pending_pay") // optimistic guard against double-cancel race
+    .select("id, status, cancelled_at, cancel_reason")
+    .single();
+  if (update.error) {
+    return json({ ok: false, error: `ticket_update: ${update.error.message}` }, 500);
+  }
+
+  return json({ ok: true, ticket: update.data });
 });
 
 function json(body: unknown, status = 200): Response {

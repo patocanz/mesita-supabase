@@ -132,3 +132,12 @@ verify_jwt = true
 
 [functions.tickets-venue-recent]
 verify_jwt = true
+
+# Manager utilities (new <caller>-<verb>-<noun> naming convention).
+# manager-lookup-guest: resolve a 6-char guest code to display name + balance.
+# manager-cancel-ticket: cancel a pending_pay ticket with a reason.
+[functions.manager-lookup-guest]
+verify_jwt = true
+
+[functions.manager-cancel-ticket]
+verify_jwt = true

@@ -23,6 +23,7 @@ type Body = {
   guestCode?: string;
   checkSubtotalCents?: number;
   tipCents?: number;
+  redeemCents?: number;
 };
 
 Deno.serve(async (req) => {
@@ -62,6 +63,7 @@ Deno.serve(async (req) => {
   const guestCode = (body.guestCode ?? "").toString().trim().toUpperCase();
   const subtotal = toCents(body.checkSubtotalCents);
   const tip = toCents(body.tipCents ?? 0);
+  const redeemRequested = toCents(body.redeemCents ?? 0);
 
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
   if (!guestCode) return json({ ok: false, error: "guestCode is required" }, 400);
@@ -70,6 +72,9 @@ Deno.serve(async (req) => {
   }
   if (tip == null) {
     return json({ ok: false, error: "tipCents must be a non-negative integer" }, 400);
+  }
+  if (redeemRequested == null) {
+    return json({ ok: false, error: "redeemCents must be a non-negative integer" }, 400);
   }
   if (subtotal === 0) {
     return json({ ok: false, error: "Check total can't be zero" }, 400);
@@ -111,10 +116,11 @@ Deno.serve(async (req) => {
   const cashbackPercent =
     venue.listing_type === "partner" ? Math.max(0, Math.min(100, venue.cashback_percent ?? 0)) : 0;
 
-  // Resolve guest by code
+  // Resolve guest by code, including current balance so we can cap any
+  // redemption against what they actually have.
   const guestRow = await admin
     .from("guests")
-    .select("id, code, full_name")
+    .select("id, code, full_name, cashback_balance_cents")
     .eq("code", guestCode)
     .maybeSingle();
   if (guestRow.error) {
@@ -124,8 +130,35 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: `No guest with code ${guestCode}` }, 404);
   }
   const guestId = guestRow.data.id;
+  const guestBalance = guestRow.data.cashback_balance_cents ?? 0;
 
   const total = subtotal + tip;
+  // Cap redemption: can't exceed balance, can't exceed check total. (We
+  // allow zero so callers can opt out cleanly.)
+  if (redeemRequested > guestBalance) {
+    return json(
+      {
+        ok: false,
+        code: "redeem_exceeds_balance",
+        error: `Guest balance is ${guestBalance} cents — can't redeem ${redeemRequested}.`,
+      },
+      400,
+    );
+  }
+  if (redeemRequested > total) {
+    return json(
+      {
+        ok: false,
+        code: "redeem_exceeds_total",
+        error: `Redemption ${redeemRequested} can't exceed the check total ${total}.`,
+      },
+      400,
+    );
+  }
+  const redeemCents = redeemRequested;
+  // Cashback EARNED is computed on the gross check total. Redemption is
+  // accounted separately on the paid transition, so guests earn on what
+  // they spent and only "use" their balance against the bill.
   const cashbackCents = Math.floor((total * cashbackPercent) / 100);
 
   // Insert ticket
@@ -141,9 +174,10 @@ Deno.serve(async (req) => {
       total_cents: total,
       cashback_percent: cashbackPercent,
       cashback_cents: cashbackCents,
+      redeem_cents: redeemCents,
     })
     .select(
-      "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, currency, created_at",
+      "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, currency, created_at",
     )
     .single();
   if (insert.error) {

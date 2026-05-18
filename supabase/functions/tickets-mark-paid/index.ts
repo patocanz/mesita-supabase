@@ -64,7 +64,7 @@ Deno.serve(async (req) => {
   const ticketRow = await admin
     .from("tickets")
     .select(
-      "id, venue_id, guest_id, status, total_cents, cashback_cents, cashback_percent, paid_at",
+      "id, venue_id, guest_id, status, total_cents, cashback_cents, cashback_percent, redeem_cents, paid_at",
     )
     .eq("id", ticketId)
     .maybeSingle();
@@ -115,28 +115,74 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: `ticket_update: ${updated.error.message}` }, 500);
   }
 
-  const cashbackCents = updated.data.cashback_cents ?? 0;
+  const cashbackCents = ticket.cashback_cents ?? 0;
+  const redeemCents = ticket.redeem_cents ?? 0;
 
-  // Update guest balance + write ledger row atomically-ish.
-  // (Supabase Postgres doesn't expose transactions to functions.invoke
-  // payloads natively without RPCs, but doing the two writes in order with
-  // ledger written after balance update is fine; if the second write fails
-  // we surface the error and the ticket stays paid — operator can re-run.)
-  let balanceAfter = 0;
-  if (cashbackCents > 0) {
-    const guestRow = await admin
-      .from("guests")
-      .select("cashback_balance_cents")
-      .eq("id", ticket.guest_id)
-      .single();
-    if (guestRow.error) {
-      return json({ ok: false, error: `guest_balance_read: ${guestRow.error.message}` }, 500);
+  // Read the current balance once. We'll apply redemption FIRST (debit)
+  // then earn (credit) and write a ledger row for each non-zero leg. The
+  // two writes happen back-to-back; if the second fails we surface the
+  // error and an operator can reconcile by hand — the ticket has already
+  // moved to 'paid'.
+  const guestRow = await admin
+    .from("guests")
+    .select("cashback_balance_cents")
+    .eq("id", ticket.guest_id)
+    .single();
+  if (guestRow.error) {
+    return json({ ok: false, error: `guest_balance_read: ${guestRow.error.message}` }, 500);
+  }
+  let balance = guestRow.data.cashback_balance_cents ?? 0;
+
+  // Apply redemption (debit) before earning (credit) so the balance
+  // movement reads in the order it makes sense for the user: "spent X,
+  // then earned Y".
+  if (redeemCents > 0) {
+    if (redeemCents > balance) {
+      // Balance went down between ticket-create and mark-paid (e.g. a
+      // concurrent redemption elsewhere). Refuse rather than driving the
+      // balance negative.
+      return json(
+        {
+          ok: false,
+          code: "redeem_exceeds_balance",
+          error: `Guest balance dropped below the ${redeemCents} cents this ticket would redeem.`,
+        },
+        409,
+      );
     }
-    balanceAfter = (guestRow.data.cashback_balance_cents ?? 0) + cashbackCents;
+    balance -= redeemCents;
+    const debit = await admin.from("cashback_ledger").insert({
+      guest_id: ticket.guest_id,
+      ticket_id: ticket.id,
+      venue_id: ticket.venue_id,
+      delta_cents: -redeemCents,
+      balance_after_cents: balance,
+      kind: "redeem",
+    });
+    if (debit.error) {
+      return json({ ok: false, error: `ledger_redeem: ${debit.error.message}` }, 500);
+    }
+  }
 
+  if (cashbackCents > 0) {
+    balance += cashbackCents;
+    const credit = await admin.from("cashback_ledger").insert({
+      guest_id: ticket.guest_id,
+      ticket_id: ticket.id,
+      venue_id: ticket.venue_id,
+      delta_cents: cashbackCents,
+      balance_after_cents: balance,
+      kind: "earn",
+    });
+    if (credit.error) {
+      return json({ ok: false, error: `ledger_earn: ${credit.error.message}` }, 500);
+    }
+  }
+
+  if (redeemCents > 0 || cashbackCents > 0) {
     const balanceUpdate = await admin
       .from("guests")
-      .update({ cashback_balance_cents: balanceAfter })
+      .update({ cashback_balance_cents: balance })
       .eq("id", ticket.guest_id);
     if (balanceUpdate.error) {
       return json(
@@ -144,25 +190,14 @@ Deno.serve(async (req) => {
         500,
       );
     }
-
-    const ledger = await admin.from("cashback_ledger").insert({
-      guest_id: ticket.guest_id,
-      ticket_id: ticket.id,
-      venue_id: ticket.venue_id,
-      delta_cents: cashbackCents,
-      balance_after_cents: balanceAfter,
-      kind: "earn",
-    });
-    if (ledger.error) {
-      return json({ ok: false, error: `ledger_write: ${ledger.error.message}` }, 500);
-    }
   }
 
   return json({
     ok: true,
     ticket: updated.data,
     cashbackCreditedCents: cashbackCents,
-    guestBalanceAfterCents: balanceAfter,
+    cashbackRedeemedCents: redeemCents,
+    guestBalanceAfterCents: balance,
   });
 });
 

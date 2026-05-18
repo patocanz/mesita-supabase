@@ -1,23 +1,24 @@
-// Supabase Edge Function — tickets-venue-recent
+// Supabase Edge Function — manager-lookup-guest
 //
-// Authenticated. Returns the most recent tickets for a venue the caller is
-// a member of. Joins the guest's display fields (code, full name) for the
-// validator UI. Self-contained.
+// Authenticated. A validator (any venue_member) looks up a guest by the
+// 6-char code on their QR. Returns the guest's display name + current
+// cashback balance so the validator UI can show "Pato — $55 available"
+// before opening a ticket. Membership of *some* venue is enough — we
+// don't enforce which venue here because lookup is global.
+//
+// Self-contained: own auth check, own DB read via service role.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
 
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 100;
-
-type Body = { venueId?: string; limit?: number };
+type Body = { code?: string };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
@@ -41,7 +42,7 @@ Deno.serve(async (req) => {
   if (userError || !userData.user) {
     return json({ ok: false, error: "Invalid session" }, 401);
   }
-  const userId = userData.user.id;
+  const callerId = userData.user.id;
 
   let body: Body = {};
   try {
@@ -49,44 +50,43 @@ Deno.serve(async (req) => {
   } catch {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
-  const venueId = (body.venueId ?? "").toString().trim();
-  if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  const limit = Math.max(
-    1,
-    Math.min(MAX_LIMIT, Math.trunc(Number(body.limit ?? DEFAULT_LIMIT))),
-  );
+  const code = (body.code ?? "").toString().trim().toUpperCase();
+  if (code.length < 4 || code.length > 12) {
+    return json({ ok: false, error: "Code must be 4-12 characters" }, 400);
+  }
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const membership = await admin
+  // Caller must be a member of at least one venue. This blocks random
+  // signed-in guests from probing other people's codes for their names /
+  // balances.
+  const callerMembership = await admin
     .from("venue_members")
-    .select("role")
-    .eq("venue_id", venueId)
-    .eq("manager_id", userId)
+    .select("manager_id", { count: "exact", head: true })
+    .eq("manager_id", callerId)
+    .limit(1);
+  if (callerMembership.error) {
+    return json({ ok: false, error: `auth_check: ${callerMembership.error.message}` }, 500);
+  }
+  if (!callerMembership.count) {
+    return json({ ok: false, error: "Not a venue member" }, 403);
+  }
+
+  const { data: guest, error } = await admin
+    .from("guests")
+    .select("id, code, full_name, cashback_balance_cents")
+    .eq("code", code)
     .maybeSingle();
-  if (membership.error) {
-    return json({ ok: false, error: `membership: ${membership.error.message}` }, 500);
-  }
-  if (!membership.data) {
-    return json({ ok: false, error: "Not a member of this venue" }, 403);
-  }
-
-  const { data, error } = await admin
-    .from("tickets")
-    .select(
-      "id, status, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, currency, created_at, paid_at, cancelled_at, cancel_reason, guest:guests(id, code, full_name)",
-    )
-    .eq("venue_id", venueId)
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
   if (error) {
-    return json({ ok: false, error: error.message }, 500);
+    return json({ ok: false, error: `lookup: ${error.message}` }, 500);
+  }
+  if (!guest) {
+    return json({ ok: false, error: `No guest with code ${code}` }, 404);
   }
 
-  return json({ ok: true, tickets: data ?? [] });
+  return json({ ok: true, guest });
 });
 
 function json(body: unknown, status = 200): Response {
