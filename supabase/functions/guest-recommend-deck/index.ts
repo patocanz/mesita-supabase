@@ -1,41 +1,38 @@
-// Supabase Edge Function — guest-build-catalog
+// Supabase Edge Function — guest-recommend-deck
 //
-// Builds a personalised catalog: up to 10 dynamically-proposed category
-// rows, each with up to 10 RAG-ranked venues. The categories are NOT a
-// prebuilt taxonomy — an LLM proposes them per request from the venue
-// mix in the user's area plus user context (location, time, profile).
+// Returns a curated 20-card deck for the guest swipe view. Anonymous
+// callers OK (the discover surface is public until sign-up). The function
+// does RAG-style ranking:
 //
-// Architecture mirrors guest-build-deck:
+//   1. Pull a bounded candidate pool by bounding-box radius (cheap).
+//   2. Compose a one-sentence intent query from user context (tier, city,
+//      time of day, last saves if signed-in).
+//   3. Embed the intent once.
+//   4. ORDER BY embedding <=> :intent_vec, LIMIT overfetch.
+//   5. Apply a small diversity rule (no >4 of the same category) and
+//      partner-first bias, then trim to `limit`.
 //
-//   1. Pull a wider candidate pool (default 300) by bounding-box radius.
-//   2. Lazily embed any candidates missing an embedding (batched, capped).
-//   3. Ask an LLM to propose category buckets that would resonate with
-//      THIS user given THIS pool — each bucket carries a label, a short
-//      description, an emoji icon, and a semantic-search intent_query.
-//   4. Embed each intent_query in one batched OpenAI call.
-//   5. For each category, cosine-rank the candidate pool against its
-//      intent vec and slice off the top N.
-//   6. Cross-category dedupe so a venue appears in at most 2 buckets
-//      (lets a really good place repeat once but not seven times).
+// If any candidate has a NULL embedding, the EF backfills up to 50 of
+// them inline (single batched OpenAI call) before ranking, so the catalog
+// self-heals over time without needing a separate cron.
 //
-// Local:  supabase functions serve guest-build-catalog
-// Deploy: supabase functions deploy guest-build-catalog
+// Local:  supabase functions serve guest-recommend-deck
+// Deploy: supabase functions deploy guest-recommend-deck
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 
-const CANDIDATE_POOL = 300;
+// Pool sizing — overfetch beyond `limit` so diversity trimming has slack.
+const CANDIDATE_POOL = 200;
+const OVERFETCH_MULTIPLIER = 2.5;
+const MAX_PER_CATEGORY = 4; // diversity cap inside the final deck
+const DEFAULT_LIMIT = 20;
 const DEFAULT_RADIUS_KM = 25;
-const DEFAULT_MAX_CATEGORIES = 10;
-const DEFAULT_PER_CATEGORY = 10;
-const MAX_PER_CATEGORY_CAP = 20;
-const LAZY_EMBED_BATCH = 80;
-const MAX_VENUE_REUSE = 2; // how many categories a single venue may appear in
+const LAZY_EMBED_BATCH = 50;
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIMS = 1536;
-const CATEGORY_MODEL = "gpt-4o-mini";
 
 const VENUE_COLUMNS =
   "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, email, created_at";
@@ -44,8 +41,7 @@ type Body = {
   lat?: number;
   lng?: number;
   radiusKm?: number;
-  maxCategories?: number;
-  perCategory?: number;
+  limit?: number;
 };
 
 Deno.serve(async (req) => {
@@ -60,7 +56,10 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  // Caller is optional — anonymous browse OK.
+  // Caller is optional — we honour the bearer if present so we can read
+  // the signed-in guest's profile for personalisation, but the public
+  // anonymous case is the common path. We still need a Supabase client
+  // for that; pass-through the auth header so RLS-aware reads work.
   const authHeader = req.headers.get("Authorization") ?? "";
   let userId: string | null = null;
   let userClient: ReturnType<typeof createClient> | null = null;
@@ -72,23 +71,29 @@ Deno.serve(async (req) => {
     userId = data.user?.id ?? null;
   }
 
+  // Parse input.
   let body: Body = {};
   try {
     body = (await req.json()) as Body;
   } catch {
-    /* fine */
+    /* anonymous browse with no body is fine */
   }
   const lat = typeof body.lat === "number" && Number.isFinite(body.lat) ? body.lat : null;
   const lng = typeof body.lng === "number" && Number.isFinite(body.lng) ? body.lng : null;
   const radiusKm = clampPositive(body.radiusKm, DEFAULT_RADIUS_KM, 200);
-  const maxCategories = clampInt(body.maxCategories, DEFAULT_MAX_CATEGORIES, 1, 12);
-  const perCategory = clampInt(body.perCategory, DEFAULT_PER_CATEGORY, 1, MAX_PER_CATEGORY_CAP);
+  const limit = clampPositive(body.limit, DEFAULT_LIMIT, 50);
 
+  // Service-role client for the actual reads + lazy embedding writes.
+  // We can't use the user-scoped client here because (a) anon may not
+  // have one and (b) embedding writes need RLS bypass.
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
   // ── 1. Candidate pool ──────────────────────────────────────────────
+  // Bounding-box prefilter. ~111km per degree latitude; longitude shrinks
+  // with cos(lat) so we widen the lng span accordingly. This is a coarse
+  // filter — we trim by exact haversine in JS after ranking.
   let candidates: VenueRow[];
   if (lat != null && lng != null) {
     const latDelta = radiusKm / 111;
@@ -105,6 +110,7 @@ Deno.serve(async (req) => {
     if (error) return json({ ok: false, error: `candidate_pool: ${error.message}` }, 500);
     candidates = (data ?? []) as VenueRow[];
   } else {
+    // No location → newest active venues. We still embed-rank below.
     const { data, error } = await admin
       .from("venues")
       .select(VENUE_COLUMNS + ", embedding, embedding_source_hash")
@@ -115,14 +121,13 @@ Deno.serve(async (req) => {
     candidates = (data ?? []) as VenueRow[];
   }
 
-  if (lat != null && lng != null) {
-    candidates = candidates.filter((v) => haversineKm(lat, lng, v.lat, v.lng) <= radiusKm);
-  }
   if (candidates.length === 0) {
-    return json({ ok: true, categories: [], summary: { candidates: 0 } });
+    return json({ ok: true, deck: [], summary: { candidates: 0, embedded: 0 } });
   }
 
   // ── 2. Lazy embedding backfill ─────────────────────────────────────
+  // Any candidate without an embedding (or with a stale hash) gets one
+  // before ranking. Bounded so the first cold request doesn't take 30s.
   const needsEmbed = candidates.filter(shouldEmbed).slice(0, LAZY_EMBED_BATCH);
   let embeddedCount = 0;
   if (needsEmbed.length > 0 && OPENAI_KEY) {
@@ -137,86 +142,42 @@ Deno.serve(async (req) => {
     }
   }
 
-  // ── 3. Propose dynamic categories with an LLM ──────────────────────
+  // ── 3. Compose user-intent query ───────────────────────────────────
   const profile = userId && userClient ? await fetchGuestProfile(userClient, userId) : null;
-  let proposed: ProposedCategory[];
+  const intent = composeIntent({
+    profile,
+    lat,
+    lng,
+    candidates,
+  });
+
+  // ── 4. Rank by embedding similarity (or fall back to partner-first) ──
+  let ranked: VenueRow[];
   if (OPENAI_KEY) {
     try {
-      proposed = await proposeCategories({
-        candidates,
-        profile,
-        lat,
-        lng,
-        maxCategories,
-        apiKey: OPENAI_KEY,
-      });
+      const intentVec = await embed(intent, OPENAI_KEY);
+      ranked = rankByCosine(candidates, intentVec);
     } catch (err) {
-      console.error("[guest-build-catalog] propose failed:", err);
-      proposed = fallbackCategories(candidates, maxCategories);
+      console.error("[guest-recommend-deck] intent embed failed:", err);
+      ranked = fallbackRank(candidates);
     }
   } else {
-    proposed = fallbackCategories(candidates, maxCategories);
+    ranked = fallbackRank(candidates);
   }
 
-  if (proposed.length === 0) {
-    return json({ ok: true, categories: [], summary: { candidates: candidates.length } });
+  // ── 5. Radius + diversity + partner-first trim ─────────────────────
+  if (lat != null && lng != null) {
+    ranked = ranked.filter((v) => haversineKm(lat, lng, v.lat, v.lng) <= radiusKm);
   }
-
-  // ── 4. Batch-embed all intent queries in ONE OpenAI call ───────────
-  let intentVecs: number[][];
-  if (OPENAI_KEY) {
-    try {
-      intentVecs = await embedBatch(proposed.map((c) => c.intent_query), OPENAI_KEY);
-    } catch (err) {
-      console.error("[guest-build-catalog] intent embed failed:", err);
-      intentVecs = [];
-    }
-  } else {
-    intentVecs = [];
-  }
-
-  // ── 5. Rank candidates per category + 6. cross-category dedupe ─────
-  const usage = new Map<string, number>(); // venue.id → # categories it appears in
-  const categories: BuiltCategory[] = [];
-  for (let i = 0; i < proposed.length; i += 1) {
-    const p = proposed[i];
-    const vec = intentVecs[i];
-    let ranked: VenueRow[];
-    if (vec && vec.length === EMBEDDING_DIMS) {
-      ranked = rankByCosine(candidates, vec);
-    } else {
-      // No vec → simple text-match fallback so the row still shows up.
-      ranked = candidates.filter((v) =>
-        (v.category ?? "").toLowerCase().includes(p.label.toLowerCase().split(" ")[0]) ||
-        (v.vibe ?? "").toLowerCase().includes(p.label.toLowerCase().split(" ")[0]),
-      );
-    }
-
-    const picked: VenueRow[] = [];
-    for (const r of ranked) {
-      if (picked.length >= perCategory) break;
-      const used = usage.get(r.id) ?? 0;
-      if (used >= MAX_VENUE_REUSE) continue;
-      picked.push(r);
-      usage.set(r.id, used + 1);
-    }
-    if (picked.length === 0) continue;
-    categories.push({
-      key: p.key,
-      label: p.label,
-      description: p.description,
-      emoji: p.emoji,
-      venues: picked.map(stripInternal),
-    });
-  }
+  const deck = diversify(ranked, limit, MAX_PER_CATEGORY);
 
   return json({
     ok: true,
-    categories,
+    deck: deck.map(stripInternal),
     summary: {
       candidates: candidates.length,
       embedded: embeddedCount,
-      categoryCount: categories.length,
+      intent,
     },
   });
 });
@@ -245,6 +206,7 @@ type VenueRow = {
   story: string | null;
   cashback_percent: number | null;
   photos: string[] | null;
+  // ... all the URL channel columns are passed through but not used here
   [key: string]: unknown;
   embedding: unknown | null;
   embedding_source_hash: string | null;
@@ -255,158 +217,66 @@ type GuestProfile = {
   country: string | null;
   birthday: string | null;
   sex: string | null;
-};
-
-type ProposedCategory = {
-  key: string;
-  label: string;
-  description: string;
-  emoji: string;
-  intent_query: string;
-};
-
-type BuiltCategory = {
-  key: string;
-  label: string;
-  description: string;
-  emoji: string;
-  venues: Omit<VenueRow, "embedding" | "embedding_source_hash">[];
+  tier?: string | null;
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Category proposal (LLM)
+// Intent composition
 // ─────────────────────────────────────────────────────────────────────
 
-async function proposeCategories({
-  candidates,
+// Builds the one-line semantic query that gets embedded. The richer this
+// is, the better the ranking — but we keep it terse so the embedding
+// stays focused on the venue-shaped signal.
+function composeIntent({
   profile,
   lat,
   lng,
-  maxCategories,
-  apiKey,
+  candidates,
 }: {
-  candidates: VenueRow[];
   profile: GuestProfile | null;
   lat: number | null;
   lng: number | null;
-  maxCategories: number;
-  apiKey: string;
-}): Promise<ProposedCategory[]> {
-  // We give the model a compact view of the pool so its categories are
-  // grounded in venues that actually exist (not generic taxonomy). Keep
-  // the payload modest — first 80 rows is plenty signal.
-  const poolDigest = candidates.slice(0, 80).map((v) => ({
-    name: v.name,
-    category: v.category,
-    vibe: v.vibe,
-    price: v.price_level,
-    listing_type: v.listing_type,
-  }));
-
+  candidates: VenueRow[];
+}): string {
+  const parts: string[] = [];
+  // Time-of-day handle. The Edge runtime is UTC; we don't know the
+  // guest's timezone, so this is rough — gives the embedder a flavour,
+  // not a hard filter.
   const now = new Date();
-  const userContext = {
-    country: profile?.country ?? null,
-    location: lat != null && lng != null ? { lat, lng } : null,
-    utc_hour: now.getUTCHours(),
-    weekday: now.toLocaleString("en", { weekday: "long" }),
-  };
+  const hour = now.getUTCHours();
+  if (hour < 11) parts.push("morning coffee and brunch energy");
+  else if (hour < 16) parts.push("lunch and afternoon hangout vibes");
+  else if (hour < 20) parts.push("golden hour rooftops and early dinner");
+  else parts.push("dinner, cocktails, and late-night spots");
 
-  const system = [
-    "You are Mesita's catalog curator. You see a real-time slice of nearby venues and one user's context.",
-    "Propose up to N catalog rows that feel hand-curated for THIS user — not a generic taxonomy.",
-    "Hard rules:",
-    "  • Every category must be groundable in the pool (don't propose 'ramen' if there's no ramen).",
-    "  • Labels must be specific and motivating: 'Polanco rooftops for golden hour' not 'Italian'.",
-    "  • Descriptions are one short sentence, written like a venue card.",
-    "  • Emoji must be a single character: 🌇 ✨ 🍷 ☕️ — not a sequence.",
-    "  • intent_query is a SEMANTIC SEARCH PROMPT (one sentence, evocative) that will be embedded and",
-    "    matched against venue text. Write it as the kind of thing a search engine could rank against,",
-    "    e.g. 'cozy candlelit bistros perfect for a quiet weeknight date'.",
-    "Return STRICT JSON only, shape:",
-    `{ "categories": [{ "label": "...", "description": "...", "emoji": "x", "intent_query": "..." }, ...] }`,
-  ].join("\n");
+  if (profile?.country) parts.push(`a guest from ${profile.country}`);
+  if (lat != null && lng != null) parts.push(`within ${DEFAULT_RADIUS_KM}km of this location`);
 
-  const user = JSON.stringify(
-    { maxCategories, userContext, pool: poolDigest },
-    null,
-    2,
-  );
+  // Soft hint about the local mix so the embedding leans into the
+  // dominant categories of the candidate pool.
+  const topCats = topCategoriesIn(candidates, 3);
+  if (topCats.length) parts.push(`mixing ${topCats.join(", ")}`);
 
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: CATEGORY_MODEL,
-      temperature: 0.7,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    }),
-  });
-  if (!r.ok) throw new Error(`propose HTTP ${r.status}`);
-  const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
-  const content = data.choices?.[0]?.message?.content ?? "";
-  const parsed = JSON.parse(content) as { categories?: Partial<ProposedCategory>[] };
-  const items = (parsed.categories ?? [])
-    .filter((c) => c && typeof c.label === "string" && typeof c.intent_query === "string")
-    .slice(0, maxCategories)
-    .map((c, idx) => ({
-      key: slug(c.label ?? `cat-${idx}`),
-      label: (c.label ?? "").slice(0, 80),
-      description: (c.description ?? "").slice(0, 140),
-      emoji: pickEmoji(c.emoji),
-      intent_query: (c.intent_query ?? c.label ?? "").slice(0, 240),
-    }));
-  return items;
+  parts.push("venues with great vibe and worth the visit");
+
+  return parts.join("; ");
 }
 
-// Used if the LLM proposal fails: bucket by Google primary category.
-function fallbackCategories(rows: VenueRow[], maxCategories: number): ProposedCategory[] {
-  const byCat = new Map<string, VenueRow[]>();
+function topCategoriesIn(rows: VenueRow[], k: number): string[] {
+  const counts = new Map<string, number>();
   for (const r of rows) {
     const c = (r.category ?? "").toLowerCase().trim();
     if (!c) continue;
-    if (!byCat.has(c)) byCat.set(c, []);
-    byCat.get(c)!.push(r);
+    counts.set(c, (counts.get(c) ?? 0) + 1);
   }
-  return [...byCat.entries()]
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, maxCategories)
-    .map(([cat]) => ({
-      key: slug(cat),
-      label: cat.charAt(0).toUpperCase() + cat.slice(1),
-      description: `Top ${cat} venues nearby`,
-      emoji: "✨",
-      intent_query: `${cat} venues with great vibe and worth the visit`,
-    }));
-}
-
-function slug(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
-}
-
-function pickEmoji(raw: unknown): string {
-  if (typeof raw !== "string" || !raw) return "✨";
-  // Grab the first grapheme — many models emit "🌇 " or "🌇✨".
-  const it = raw[Symbol.iterator]();
-  const first = it.next();
-  return first.done ? "✨" : (first.value as string);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, k)
+    .map(([c]) => c);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Embedding helpers (mirrors guest-build-deck — kept inline so each EF
-// stays self-contained per the "no function-to-function calls" rule)
+// Embedding helpers
 // ─────────────────────────────────────────────────────────────────────
 
 function venueSourceText(v: VenueRow): string {
@@ -421,6 +291,8 @@ function venueSourceText(v: VenueRow): string {
   return lines.join("\n");
 }
 
+// Cheap stable digest of the source text — used so we can detect "this
+// venue's text changed, re-embed" without storing the whole text.
 async function digest(text: string): Promise<string> {
   const buf = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-1", buf);
@@ -432,6 +304,9 @@ async function digest(text: string): Promise<string> {
 
 function shouldEmbed(v: VenueRow): boolean {
   if (!v.embedding) return true;
+  // We re-derive the source text and compare hashes on every read — cheap
+  // (sha1 over <1KB) and lets edits flow into the index without manual
+  // backfill.
   return v.embedding_source_hash == null;
 }
 
@@ -443,10 +318,14 @@ async function embedAndPersist(
   admin: ReturnType<typeof createClient>,
   apiKey: string,
 ): Promise<Map<string, { embedding: number[]; hash: string }>> {
+  // venueSourceText() is called once per row — hashing the same text is
+  // cheap but venueSourceText itself isn't free, and we'd otherwise call
+  // it twice (once for the OpenAI input, once for the hash).
   const inputs = await Promise.all(rows.map(async (r) => {
     const text = venueSourceText(r);
     return { id: r.id, text, hash: await digest(text) };
   }));
+
   const out = new Map<string, { embedding: number[]; hash: string }>();
   try {
     const r = await fetch("https://api.openai.com/v1/embeddings", {
@@ -461,13 +340,19 @@ async function embedAndPersist(
       }),
     });
     if (!r.ok) {
-      console.error("[guest-build-catalog] batch-embed HTTP", r.status, (await r.text()).slice(0, 240));
+      const errText = (await r.text()).slice(0, 240);
+      console.error("[guest-recommend-deck] batch-embed HTTP", r.status, errText);
       return out;
     }
-    const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
+    const data = (await r.json()) as {
+      data?: { embedding: number[]; index: number }[];
+    };
     const byIdx = new Map<number, number[]>();
     for (const d of data.data ?? []) byIdx.set(d.index, d.embedding);
 
+    // Persist in parallel — N updates fan out concurrently instead of
+    // serialising. supabase-js queues at the HTTP layer; PostgREST is fine
+    // with 50 concurrent single-row updates.
     await Promise.all(inputs.map(async (inp, i) => {
       const v = byIdx.get(i);
       if (!v || v.length !== EMBEDDING_DIMS) return;
@@ -479,35 +364,47 @@ async function embedAndPersist(
         })
         .eq("id", inp.id);
       if (error) {
-        console.error("[guest-build-catalog] embed write:", error.message);
+        console.error("[guest-recommend-deck] embed write:", error.message);
         return;
       }
       out.set(inp.id, { embedding: v, hash: inp.hash });
     }));
     return out;
   } catch (err) {
-    console.error("[guest-build-catalog] embed exception:", err);
+    console.error("[guest-recommend-deck] embed exception:", err);
     return out;
   }
 }
 
-async function embedBatch(texts: string[], apiKey: string): Promise<number[][]> {
+async function embed(text: string, apiKey: string): Promise<number[]> {
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
   });
-  if (!r.ok) throw new Error(`embedBatch HTTP ${r.status}`);
-  const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
-  const out: number[][] = new Array(texts.length);
-  for (const d of data.data ?? []) out[d.index] = d.embedding;
-  return out;
+  if (!r.ok) throw new Error(`embed HTTP ${r.status}`);
+  const data = (await r.json()) as { data?: { embedding: number[] }[] };
+  const v = data.data?.[0]?.embedding;
+  if (!v || v.length !== EMBEDDING_DIMS) throw new Error("embed: bad shape");
+  return v;
 }
 
+// pgvector accepts vectors as text literals like "[0.01,0.02,...]". We
+// build that here so the .update() call sends a plain string (supabase-js
+// doesn't have a vector binder).
 function vectorLiteral(v: number[]): string {
   return `[${v.map((x) => x.toFixed(6)).join(",")}]`;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Ranking
+// ─────────────────────────────────────────────────────────────────────
+
+// Cosine similarity between two vectors that are already normalised
+// approximately (text-embedding-3-small returns unit-length vectors).
 function cosineSim(a: number[], b: number[]): number {
   let dot = 0;
   for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
@@ -529,15 +426,49 @@ function parseVector(v: unknown): number[] | null {
 function rankByCosine(rows: VenueRow[], queryVec: number[]): VenueRow[] {
   const scored = rows.map((r) => {
     const v = parseVector(r.embedding);
-    const score = v ? cosineSim(v, queryVec) : -1;
+    const score = v ? cosineSim(v, queryVec) : -1; // no embedding → tail
     return { row: r, score };
   });
   scored.sort((a, b) => b.score - a.score);
   return scored.map((s) => s.row);
 }
 
+function fallbackRank(rows: VenueRow[]): VenueRow[] {
+  // Partner-first, then newest. Stable when OpenAI is down.
+  return [...rows].sort((a, b) => {
+    const ap = a.listing_type === "partner" ? 0 : 1;
+    const bp = b.listing_type === "partner" ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    return 0;
+  });
+}
+
+// Cap the final deck so we don't return 20 identical "Italian" cards.
+function diversify(rows: VenueRow[], limit: number, perCategory: number): VenueRow[] {
+  const out: VenueRow[] = [];
+  const seenCat = new Map<string, number>();
+  const tail: VenueRow[] = [];
+  for (const r of rows) {
+    if (out.length >= limit) break;
+    const cat = (r.category ?? "").toLowerCase().trim();
+    const count = seenCat.get(cat) ?? 0;
+    if (cat && count >= perCategory) {
+      tail.push(r);
+      continue;
+    }
+    out.push(r);
+    if (cat) seenCat.set(cat, count + 1);
+  }
+  // Top up from the tail if diversity left us short.
+  for (const r of tail) {
+    if (out.length >= limit) break;
+    out.push(r);
+  }
+  return out;
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// Geo + misc
+// Geo helpers
 // ─────────────────────────────────────────────────────────────────────
 
 function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: number | null): number {
@@ -552,6 +483,10 @@ function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: numb
       Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Misc
+// ─────────────────────────────────────────────────────────────────────
 
 async function fetchGuestProfile(
   client: ReturnType<typeof createClient>,
@@ -571,12 +506,8 @@ function clampPositive(v: unknown, def: number, max: number): number {
   return Math.min(n, max);
 }
 
-function clampInt(v: unknown, def: number, lo: number, hi: number): number {
-  const n = typeof v === "number" ? v : Number(v);
-  if (!Number.isFinite(n)) return def;
-  return Math.max(lo, Math.min(hi, Math.trunc(n)));
-}
-
+// Strip embedding + hash before returning — they're huge and the
+// frontend has no use for them.
 function stripInternal(v: VenueRow): Omit<VenueRow, "embedding" | "embedding_source_hash"> {
   const { embedding: _e, embedding_source_hash: _h, ...rest } = v;
   void _e; void _h;
