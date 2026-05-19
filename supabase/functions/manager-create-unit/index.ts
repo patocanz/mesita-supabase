@@ -113,6 +113,13 @@ Deno.serve(async (req) => {
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_SUPABASE_API_KEY");
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_SUPABASE_API_KEY");
   const OPENAI_KEY = Deno.env.get("OPENAI_SUPABASE_API_KEY");
+  // Google Custom Search (image search) for venue marketing-grade photos.
+  // Independent of Google Maps Platform: it needs its own API key + a
+  // Programmable Search Engine ID configured to "search the entire web"
+  // with image search ON. Optional — when either secret is missing we
+  // simply skip this enrichment source.
+  const GOOGLE_CSE_KEY = Deno.env.get("GOOGLE_CSE_SUPABASE_API_KEY");
+  const GOOGLE_CSE_ID = Deno.env.get("GOOGLE_CSE_ID");
 
   if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY || !GOOGLE_KEY) {
     return json({ ok: false, error: "Server misconfigured (missing core secrets)" }, 500);
@@ -186,29 +193,48 @@ Deno.serve(async (req) => {
   const address = details.formattedAddress ?? null;
 
   // ── Step 2: Parallel enrichment (best-effort, all may individually fail) ──
-  const [photosResult, firecrawlResult, perplexityResult, timezoneResult] = await Promise.allSettled([
+  // Photo sources, in priority order:
+  //   1. Google Custom Search (image search) — usually marketing-grade
+  //      shots from press, blogs, IG mirrors; quality > Google Places.
+  //   2. Firecrawl — images scraped from the venue's own website.
+  //   3. Google Places photos — last resort. They're user-generated,
+  //      tend to be dim phone shots, but they cover venues that have
+  //      no website and no press.
+  // We put the better source first so the swipe-card cover photo
+  // (photos[0]) is the best image we can find.
+  const [
+    placesPhotosResult,
+    cseImagesResult,
+    firecrawlResult,
+    perplexityResult,
+    timezoneResult,
+  ] = await Promise.allSettled([
     fetchGooglePhotos(details.photos ?? [], MAX_PHOTOS, GOOGLE_KEY),
+    fetchCseImages(venueName, city, country, GOOGLE_CSE_KEY, GOOGLE_CSE_ID),
     fetchFirecrawl(details.websiteUri, FIRECRAWL_KEY),
     fetchPerplexity(venueName, city, country, details.primaryTypeDisplayName?.text ?? null, PERPLEXITY_KEY),
     fetchTimezone(details.location?.latitude, details.location?.longitude, GOOGLE_KEY),
   ]);
-  const googlePhotos = photosResult.status === "fulfilled" ? photosResult.value : [];
+  const placesPhotos = placesPhotosResult.status === "fulfilled" ? placesPhotosResult.value : [];
+  const cseImages = cseImagesResult.status === "fulfilled" ? cseImagesResult.value : [];
   const firecrawl = firecrawlResult.status === "fulfilled" ? firecrawlResult.value : null;
   const perplexity = perplexityResult.status === "fulfilled" ? perplexityResult.value : null;
   const timezone = timezoneResult.status === "fulfilled" ? timezoneResult.value : null;
 
-  // Google caps the Places response at 10 photos. Supplement from the
-  // scraped website until we hit MAX_PHOTOS.
-  const photos: { photoUri: string }[] = [...googlePhotos];
-  if (firecrawl?.markdown && photos.length < MAX_PHOTOS) {
-    const seen = new Set(photos.map((p) => p.photoUri));
-    for (const uri of extractImagesFromMarkdown(firecrawl.markdown)) {
-      if (photos.length >= MAX_PHOTOS) break;
-      if (seen.has(uri)) continue;
-      photos.push({ photoUri: uri });
-      seen.add(uri);
-    }
+  // Merge sources in priority order with URL-dedup. Stops at MAX_PHOTOS.
+  const photos: { photoUri: string }[] = [];
+  const seen = new Set<string>();
+  const push = (uri: string) => {
+    if (photos.length >= MAX_PHOTOS) return;
+    if (seen.has(uri)) return;
+    photos.push({ photoUri: uri });
+    seen.add(uri);
+  };
+  for (const img of cseImages) push(img);
+  if (firecrawl?.markdown) {
+    for (const uri of extractImagesFromMarkdown(firecrawl.markdown)) push(uri);
   }
+  for (const p of placesPhotos) push(p.photoUri);
 
   // ── Channel extraction ──
   // Walk every outbound link we can collect (Google's websiteUri +
@@ -432,6 +458,78 @@ async function fetchGooglePhotos(
   return settled
     .filter((s): s is PromiseFulfilledResult<{ photoUri: string }> => s.status === "fulfilled")
     .map((s) => s.value);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Google Custom Search — image search
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Why this exists: Google Places returns 10 photos at best, mostly
+// user-uploaded reviews — low-res, badly lit, weird angles. Custom Search
+// over the open web pulls marketing-grade shots from press, blogs, IG
+// mirrors, etc. Quality dominates on average.
+//
+// Setup notes (one-time):
+//   1. Cloud Console → enable "Custom Search API" on a project.
+//   2. Create an API key restricted to that API.
+//   3. https://cse.google.com → create a new Programmable Search Engine
+//      with "Search the entire web" enabled and "Image search" turned on.
+//      Copy the CX (engine) ID.
+//   4. supabase secrets set:
+//        GOOGLE_CSE_SUPABASE_API_KEY=<api key>
+//        GOOGLE_CSE_ID=<cx>
+//
+// Cost: 100 free queries/day, then $5/1000. We call this once per
+// create_unit invocation, so a small venue rollout stays well inside
+// the free tier; a city-wide push needs the paid tier billed monthly.
+//
+// Returns `[]` (gracefully) when either secret is missing or the API
+// errors. Photos from other sources still flow through.
+async function fetchCseImages(
+  venueName: string,
+  city: string | null,
+  country: string | null,
+  apiKey: string | undefined,
+  cseId: string | undefined,
+): Promise<string[]> {
+  if (!apiKey || !cseId) return [];
+  // Build a city-scoped query so 'La Casa' in Monterrey doesn't pull
+  // photos of 'La Casa' in Madrid.
+  const parts = [venueName];
+  if (city) parts.push(city);
+  if (country && country !== city) parts.push(country);
+  const q = parts.join(" ");
+  // num=10 is the max per request. Order by relevance (default).
+  const url =
+    "https://www.googleapis.com/customsearch/v1" +
+    `?key=${encodeURIComponent(apiKey)}` +
+    `&cx=${encodeURIComponent(cseId)}` +
+    `&q=${encodeURIComponent(q)}` +
+    "&searchType=image" +
+    "&num=10" +
+    "&safe=active" +
+    "&imgSize=large";
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return [];
+    const d = (await r.json()) as {
+      items?: { link?: string; mime?: string }[];
+    };
+    if (!d.items) return [];
+    return d.items
+      .filter(
+        (it) =>
+          typeof it.link === "string" &&
+          it.link.startsWith("https://") &&
+          // Drop obvious non-photo formats. CSE sometimes returns SVG /
+          // ICO from logos which we don't want as venue covers.
+          !/\.(svg|ico)(\?|$)/i.test(it.link) &&
+          (it.mime ? it.mime.startsWith("image/") : true),
+      )
+      .map((it) => it.link!) as string[];
+  } catch {
+    return [];
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
