@@ -281,6 +281,39 @@ Deno.serve(async (req) => {
     discountPercent = ratePercent;
     discountCents = Math.floor((total * ratePercent) / 100);
     if (discountCents > total) discountCents = total;
+    // Balance is now portable across fiscal types. At an Informal venue
+    // the guest's cashback balance is applied on top of the discount:
+    // billAfterDiscount = total - discountCents
+    // redeem = min(guest balance, billAfterDiscount)
+    // The cash the guest hands the waiter = billAfterDiscount - redeem.
+    // Mesita is on the hook to pay the venue the `redeem` portion out of
+    // its float (tracked as a redeem ledger row scoped to this venue).
+    const billAfterDiscount = total - discountCents;
+    const cap = Math.min(guestBalance, billAfterDiscount);
+    if (redeemRequested > guestBalance) {
+      return json(
+        {
+          ok: false,
+          code: "redeem_exceeds_balance",
+          error: `Guest balance is ${guestBalance} cents — can't redeem ${redeemRequested}.`,
+        },
+        400,
+      );
+    }
+    if (redeemRequested > billAfterDiscount) {
+      return json(
+        {
+          ok: false,
+          code: "redeem_exceeds_total",
+          error: `Redemption ${redeemRequested} can't exceed the post-discount bill ${billAfterDiscount}.`,
+        },
+        400,
+      );
+    }
+    // If the caller didn't request a specific redemption, default to the
+    // full available cap — this is the "auto-applies" promise the guest
+    // app makes on /qr ("Auto-applies to your next bill at any partner").
+    redeemCents = redeemRequested > 0 ? redeemRequested : cap;
   }
 
   // ── Reservation fields ────────────────────────────────────────────────
@@ -383,6 +416,39 @@ Deno.serve(async (req) => {
       { ok: false, error: `ticket_insert: ${insert.error.message}` },
       500,
     );
+  }
+
+  // ── Informal: apply redemption immediately ────────────────────────────
+  // Informal tickets settle off-rail (status goes straight to 'revealed'
+  // and there's no manager-mark-paid step). If we captured a redemption,
+  // we have to debit the guest balance and write the ledger row right
+  // now — otherwise the credit never lands on the venue side. Formal
+  // tickets keep deferring this to manager-mark-paid.
+  if (!isFormal && redeemCents > 0) {
+    const newBalance = guestBalance - redeemCents;
+    const ledger = await admin.from("cashback_ledger").insert({
+      guest_id: guestId,
+      ticket_id: insert.data.id,
+      venue_id: venueId,
+      delta_cents: -redeemCents,
+      balance_after_cents: newBalance,
+      kind: "redeem",
+    });
+    if (ledger.error) {
+      // We've already inserted the ticket — surface the ledger failure but
+      // don't roll back. Reconciliation can replay the ledger row later.
+      console.error("[manager-create-ticket] informal_redeem_ledger:", ledger.error);
+    }
+    const balanceUpdate = await admin
+      .from("guests")
+      .update({ cashback_balance_cents: newBalance })
+      .eq("id", guestId);
+    if (balanceUpdate.error) {
+      console.error(
+        "[manager-create-ticket] informal_redeem_balance:",
+        balanceUpdate.error,
+      );
+    }
   }
 
   return json(

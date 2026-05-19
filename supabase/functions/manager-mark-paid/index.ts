@@ -14,8 +14,10 @@
 //   - kinds without a story step (p_c, r_p_c) credit cashback immediately
 //     on mark-paid.
 //
-// Informal kinds are rejected here — they don't go through Mesita's
-// payment rail, the discount has already been applied at the bill.
+// Informal kinds are not expected here — they settle at create-time in
+// manager-create-ticket (status goes straight to 'revealed' and the
+// redemption is applied inline). If one slips through (e.g. a future
+// Stripe webhook fires on an informal ticket), we still reject below.
 //
 // Authorisation: either a venue_member of the ticket's venue OR the
 // ticket's guest can call this. (In v0 the validator marks paid manually;
