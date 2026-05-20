@@ -8,20 +8,21 @@
 // Naming convention for third-party secrets:
 //   `<VENDOR>_SUPABASE_API_KEY`  (server-side, lives in Supabase secrets)
 //   `NEXT_PUBLIC_<VENDOR>_BROWSER_KEY`  (client-side, lives in Vercel)
-// Google's vendor name is "GOOGLE_MAPS_PLATFORM" — that's what Google
-// calls the umbrella product, so it stays in the secret name.
 //
 // JWT-protected: clients must send the Supabase anon JWT in `Authorization`.
 //
-// IMPORTANT: this function always returns HTTP 200, even on Google failures.
-// supabase-js's `functions.invoke` swallows the response body on non-2xx
-// and surfaces a generic "Edge Function returned a non-2xx status code" to
-// the client, which makes real errors invisible. By keeping the wire status
-// at 200 and using the body's `{ ok, error }` shape, the existing client
-// helper (`if (!data?.ok) throw new Error(data.error)`) shows the real
-// message. The body still carries a `httpStatus` field for telemetry.
+// Also runs a Mesita-side name ILIKE search in parallel so already-
+// onboarded venues surface even when Google autocomplete misses (Google
+// is picky about city qualifiers, accents, etc.). Each prediction
+// carries `inMesita: boolean` so the UI can badge it.
+//
+// IMPORTANT: this function always returns HTTP 200, even on Google
+// failures. supabase-js's `functions.invoke` swallows the response body
+// on non-2xx and surfaces a generic message, which makes real errors
+// invisible. The body's `{ ok, error }` shape carries the real signal.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
 
@@ -33,6 +34,13 @@ const CORS_HEADERS = {
 };
 
 type Body = { input?: string; sessionToken?: string };
+
+type Prediction = {
+  placeId: string;
+  mainText: string;
+  secondaryText: string;
+  inMesita: boolean;
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -69,75 +77,164 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "Missing sessionToken" });
   }
 
-  try {
-    const r = await fetch(AUTOCOMPLETE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": apiKey,
-      },
-      body: JSON.stringify({
-        input,
-        sessionToken,
-        // Note: we don't constrain by includedPrimaryTypes — Google's
-        // autocomplete is best when allowed to match anything the user
-        // typed, and we filter venue-eligible types on the details side
-        // anyway. A previous version of this function limited to
-        // ["restaurant", "bar", "cafe", "bakery", "night_club"] which
-        // dropped valid Mexican venues whose primary type didn't match
-        // Google's English-centric taxonomy (e.g. "La Bocana" → typed
-        // as `food` only, no autocomplete results).
-      }),
-    });
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!r.ok) {
-      const text = await r.text();
-      const code = classifyGoogleError(r.status, text);
-      return jsonResponse({
+  // Fire Google + Mesita searches in parallel. Either can fail
+  // independently; we merge whatever comes back.
+  const [googleResult, mesitaResult] = await Promise.allSettled([
+    fetchGooglePredictions(input, sessionToken, apiKey),
+    SUPABASE_URL && SERVICE_KEY
+      ? fetchMesitaPredictions(SUPABASE_URL, SERVICE_KEY, input)
+      : Promise.resolve([] as Prediction[]),
+  ]);
+
+  if (googleResult.status === "rejected" && mesitaResult.status === "rejected") {
+    return jsonResponse({
+      ok: false,
+      code: "network_error",
+      error:
+        googleResult.reason instanceof Error
+          ? googleResult.reason.message
+          : "Search failed.",
+    });
+  }
+  // If Google explicitly returned an error envelope (not just rejected),
+  // surface that — Mesita fallback alone isn't enough for the operator
+  // to know their search worked.
+  if (googleResult.status === "fulfilled" && googleResult.value.errorEnvelope) {
+    return jsonResponse(googleResult.value.errorEnvelope);
+  }
+
+  const googlePreds =
+    googleResult.status === "fulfilled" ? googleResult.value.predictions : [];
+  const mesitaPreds =
+    mesitaResult.status === "fulfilled" ? mesitaResult.value : [];
+
+  // Merge: Mesita-side hits take precedence (their inMesita=true wins
+  // over a Google entry with the same placeId), then any remaining
+  // Google entries follow. Stable order.
+  const byPlaceId = new Map<string, Prediction>();
+  for (const p of mesitaPreds) byPlaceId.set(p.placeId, p);
+  for (const p of googlePreds) {
+    const existing = byPlaceId.get(p.placeId);
+    if (existing) {
+      // Google's structured format is usually nicer text; keep Mesita's
+      // inMesita flag and prefer Google's text when both exist.
+      byPlaceId.set(p.placeId, { ...p, inMesita: existing.inMesita });
+    } else {
+      byPlaceId.set(p.placeId, p);
+    }
+  }
+  // Already-in-Mesita predictions surface first so the operator sees
+  // the existing profile before the long tail of Google matches.
+  const predictions = Array.from(byPlaceId.values()).sort((a, b) => {
+    if (a.inMesita === b.inMesita) return 0;
+    return a.inMesita ? -1 : 1;
+  });
+
+  return jsonResponse({ ok: true, predictions, mock: false });
+});
+
+// ── Google ────────────────────────────────────────────────────────────
+
+async function fetchGooglePredictions(
+  input: string,
+  sessionToken: string,
+  apiKey: string,
+): Promise<{
+  predictions: Prediction[];
+  errorEnvelope?: Record<string, unknown>;
+}> {
+  const r = await fetch(AUTOCOMPLETE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+    },
+    body: JSON.stringify({ input, sessionToken }),
+  });
+
+  if (!r.ok) {
+    const text = await r.text();
+    const code = classifyGoogleError(r.status, text);
+    return {
+      predictions: [],
+      errorEnvelope: {
         ok: false,
         code,
         error: friendlyGoogleError(code, r.status, text),
         httpStatus: r.status,
-      });
-    }
-
-    const data = (await r.json()) as {
-      suggestions?: Array<{
-        placePrediction?: {
-          placeId: string;
-          structuredFormat?: {
-            mainText?: { text?: string };
-            secondaryText?: { text?: string };
-          };
-          text?: { text?: string };
-        };
-      }>;
+      },
     };
-
-    const predictions = (data.suggestions ?? [])
-      .map((s) => s.placePrediction)
-      .filter((p): p is NonNullable<typeof p> => !!p)
-      .map((p) => ({
-        placeId: p.placeId,
-        mainText: p.structuredFormat?.mainText?.text ?? p.text?.text ?? "",
-        secondaryText: p.structuredFormat?.secondaryText?.text ?? "",
-      }))
-      .filter((p) => p.placeId && p.mainText);
-
-    return jsonResponse({ ok: true, predictions, mock: false });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({
-      ok: false,
-      code: "network_error",
-      error: `Couldn't reach Google: ${message}`,
-    });
   }
-});
 
-// Map a raw Google status + body into a small enum the client can branch on
-// if it cares. Mostly here so we can tell "key restriction" apart from
-// "service down".
+  const data = (await r.json()) as {
+    suggestions?: Array<{
+      placePrediction?: {
+        placeId: string;
+        structuredFormat?: {
+          mainText?: { text?: string };
+          secondaryText?: { text?: string };
+        };
+        text?: { text?: string };
+      };
+    }>;
+  };
+
+  const predictions = (data.suggestions ?? [])
+    .map((s) => s.placePrediction)
+    .filter((p): p is NonNullable<typeof p> => !!p)
+    .map<Prediction>((p) => ({
+      placeId: p.placeId,
+      mainText: p.structuredFormat?.mainText?.text ?? p.text?.text ?? "",
+      secondaryText: p.structuredFormat?.secondaryText?.text ?? "",
+      inMesita: false,
+    }))
+    .filter((p) => p.placeId && p.mainText);
+  return { predictions };
+}
+
+// ── Mesita-side fallback ──────────────────────────────────────────────
+
+async function fetchMesitaPredictions(
+  supabaseUrl: string,
+  serviceKey: string,
+  input: string,
+): Promise<Prediction[]> {
+  const admin = createClient(supabaseUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  // ILIKE prefix-and-contains so "strana" finds both "Strana" and "Casa
+  // Strana, Monterrey". Limit small — Google is the primary surface;
+  // this is a fallback for the long-tail case where Google misses.
+  const { data, error } = await admin
+    .from("venues")
+    .select("google_place_id, name, address")
+    .ilike("name", `%${escapeIlike(input)}%`)
+    .not("google_place_id", "is", null)
+    .limit(8);
+  if (error) {
+    console.error("[manager-suggest-places] mesita search:", error.message);
+    return [];
+  }
+  type Row = { google_place_id: string; name: string; address: string | null };
+  return ((data ?? []) as Row[]).map<Prediction>((v) => ({
+    placeId: v.google_place_id,
+    mainText: v.name,
+    secondaryText: v.address ?? "Already on Mesita",
+    inMesita: true,
+  }));
+}
+
+function escapeIlike(s: string): string {
+  // % and _ are wildcards in ILIKE — escape so user input doesn't
+  // accidentally match everything.
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+// ── Google error classification ───────────────────────────────────────
+
 function classifyGoogleError(status: number, body: string): string {
   if (status === 403) {
     if (/referer|referrer/i.test(body)) return "google_referrer_blocked";
@@ -173,7 +270,6 @@ function friendlyGoogleError(code: string, status: number, body: string): string
 }
 
 function jsonResponse(body: unknown): Response {
-  // Always 200 on the wire — see top-of-file comment.
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
