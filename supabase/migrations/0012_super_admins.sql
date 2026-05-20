@@ -32,12 +32,8 @@ alter table public.super_admins enable row level security;
 
 -- Seed
 -- ----
--- TODO Pato: insert the founder emails before applying this migration
--- in production. Example:
---
---   insert into public.super_admins (email, note) values
---     ('pato@canzeco.com', 'founder'),
---     ('luis@canzeco.com', 'founder');
---
--- Until you do this, NO ONE can act as super-admin — which is the
--- correct safe default. Add yourself first.
+-- Founder allowlist. Add or remove rows later via the Supabase SQL
+-- editor (or a future admin UI) — this table IS the management surface.
+insert into public.super_admins (email, note) values
+  ('pato@canzeco.com', 'founder'),
+  ('admin@canzeco.com', 'founder');
