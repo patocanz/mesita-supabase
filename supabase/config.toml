@@ -44,7 +44,12 @@ enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 enable_signup = true
 enable_anonymous_sign_ins = false
+# MFA — required only for admin sign-in, kept available so managers can
+# enrol if they want. Admin-side enforcement lives in admin-signin-email.
+enable_manual_linking = false
 
+# Email — password only. No magic link, no email OTP. Guests don't get
+# email auth at all; manager + admin live here.
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
@@ -53,6 +58,27 @@ secure_password_change = false
 max_frequency = "1s"
 otp_length = 6
 otp_expiry = 3600
+
+# Phone — Twilio Verify, Mexico template at signup. Guests + staff sign
+# in here; managers + admins never see this provider.
+[auth.sms]
+enable_signup = true
+enable_confirmations = true
+template = "Your Mesita code is {{ .Code }}"
+max_frequency = "60s"
+
+[auth.sms.twilio]
+enabled = true
+account_sid = "env(TWILIO_ACCOUNT_SID)"
+message_service_sid = "env(TWILIO_MESSAGE_SERVICE_SID)"
+auth_token = "env(TWILIO_AUTH_TOKEN)"
+
+# OAuth providers — all explicitly disabled. Spec: no Google, no Apple.
+[auth.external.google]
+enabled = false
+
+[auth.external.apple]
+enabled = false
 
 [edge_runtime]
 enabled = true
@@ -75,6 +101,28 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # guest-list-tickets). All functions verify the JWT except the truly public
 # catalog reads, which rely on RLS to gate visibility instead.
 #
+# --- Auth (post-signin housekeeping per role) ---
+
+# Sign-in EFs run AFTER the Supabase Auth call lands a session. They set
+# app_metadata.role, create the corresponding profile row, and (admin)
+# enforce @canzeco.com + MFA. verify_jwt=true gates each to a real session.
+
+[functions.guest-signin-phone]
+verify_jwt = true
+
+[functions.staff-accept-invite]
+verify_jwt = true
+
+[functions.manager-signin-email]
+verify_jwt = true
+
+[functions.admin-signin-email]
+verify_jwt = true
+
+# Tiny session-check used by the admin web's app shell.
+[functions.admin-whoami]
+verify_jwt = true
+
 # --- Guest (public reads + authed writes) ---
 
 # Public catalog reads. RLS enforces which venue statuses are visible.
@@ -146,3 +194,22 @@ verify_jwt = true
 
 [functions.manager-get-place]
 verify_jwt = true
+
+# --- Admin (gated by x-admin-key header, not JWT) ---
+#
+# Admin EFs use the per-call admin-key pattern: the admin app stores an
+# operator-entered key in an HttpOnly cookie and forwards it as the
+# `x-admin-key` header on every privileged call. The EFs themselves
+# compare against the ADMIN_ACCESS_KEY Supabase secret. JWT verification
+# is therefore disabled at the gateway — the admin-key check inside the
+# function is the only gate.
+
+# Bulk Google Places Text Search proxy. Many queries in, deduped
+# Place IDs out.
+[functions.admin-search-places]
+verify_jwt = false
+
+# Resolve a Google Place ID to a Mesita venue. Powers the admin console's
+# super-admin deep-link generator.
+[functions.admin-find-venue]
+verify_jwt = false

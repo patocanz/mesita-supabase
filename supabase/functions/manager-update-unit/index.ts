@@ -89,18 +89,29 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  // Super-admin bypass via x-super-admin-key (matched against ADMIN_ACCESS_KEY).
-  // Skips JWT + venue_members membership checks — used by the admin web's
-  // deep-link flow so operators can edit any venue without being on its team.
+  // Super-admin paths:
+  //   1. Legacy: `x-super-admin-key` header matches ADMIN_ACCESS_KEY.
+  //      Kept for one cutover so the old admin-web link generator
+  //      doesn't break. Burnt once nothing emits this header.
+  //   2. New: caller's JWT email is in public.super_admins.
+  //
+  // Either path skips the venue_members check. Used by the admin web's
+  // deep-link flow so operators can edit any venue without being on its
+  // team.
   const ADMIN_ACCESS_KEY = Deno.env.get("ADMIN_ACCESS_KEY");
-  const superAdminKey = req.headers.get("x-super-admin-key") ?? "";
-  const isSuperAdmin =
+  const legacySuperAdminKey = req.headers.get("x-super-admin-key") ?? "";
+  const legacyIsSuperAdmin =
     ADMIN_ACCESS_KEY != null &&
     ADMIN_ACCESS_KEY.length > 0 &&
-    superAdminKey === ADMIN_ACCESS_KEY;
+    legacySuperAdminKey === ADMIN_ACCESS_KEY;
+
+  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 
   let userId: string | null = null;
-  if (!isSuperAdmin) {
+  let isSuperAdmin = legacyIsSuperAdmin;
+  if (!legacyIsSuperAdmin) {
     const authHeader = req.headers.get("Authorization") ?? "";
     if (!authHeader.startsWith("Bearer ")) {
       return json({ ok: false, error: "Missing bearer token" }, 401);
@@ -113,6 +124,27 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: "Invalid session" }, 401);
     }
     userId = userData.user.id;
+    const userEmail = userData.user.email ?? null;
+
+    // Allowlist check (same shape as manager-get-overview).
+    const emailLower = userEmail?.toLowerCase() ?? null;
+    if (emailLower) {
+      const { data: saRow } = await admin
+        .from("super_admins")
+        .select("email, user_id")
+        .eq("email", emailLower)
+        .maybeSingle();
+      if (saRow) {
+        isSuperAdmin = true;
+        if (saRow.user_id == null) {
+          void admin
+            .from("super_admins")
+            .update({ user_id: userId })
+            .eq("email", emailLower)
+            .is("user_id", null);
+        }
+      }
+    }
   }
 
   // Parse + validate.
@@ -125,10 +157,6 @@ Deno.serve(async (req) => {
   const venueId = (body.id ?? "").toString().trim();
   if (!venueId) return json({ ok: false, error: "id is required" }, 400);
 
-  // Authorisation: super-admin skips, regular users must be a venue member.
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
   if (!isSuperAdmin) {
     const { data: membership, error: membershipError } = await admin
       .from("venue_members")

@@ -5,10 +5,12 @@
 // the API max (3 pages × 20 = 60 results) and runs queries with bounded
 // concurrency so a 50-query batch completes well inside the EF timeout.
 //
-// Admin auth: `x-admin-key` header must equal the `ADMIN_ACCESS_KEY`
-// Supabase secret. There is no JWT — the admin app stores the key in an
-// HttpOnly cookie and forwards it server-side via a Next.js route. JWT
-// verification is therefore disabled on this function in config.toml.
+// Auth (dual-path during the super_admins migration):
+//   1. Legacy: `x-admin-key` header == `ADMIN_ACCESS_KEY` env.
+//   2. New: caller's JWT email is in public.super_admins.
+// JWT verification stays off in config.toml during the cutover so the
+// legacy header callers (no JWT) still work; we verify the bearer
+// manually when it's present.
 //
 // Google key: `GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY` (same secret used
 // by manager-suggest-places / manager-get-place). The key never leaves
@@ -74,18 +76,52 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  // --- Auth: admin key ---
-  const expectedAdminKey = Deno.env.get("ADMIN_ACCESS_KEY");
-  if (!expectedAdminKey) {
-    return json({
-      ok: false,
-      code: "server_missing_admin_key",
-      error:
-        "Mesita backend isn't configured for admin actions. Tell support — they need to set ADMIN_ACCESS_KEY.",
-    });
+  // --- Auth: legacy admin-key header OR super_admins allowlist via JWT ---
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
+  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
+    return json({ ok: false, error: "Server misconfigured" });
   }
-  const providedAdminKey = req.headers.get("x-admin-key") ?? "";
-  if (providedAdminKey !== expectedAdminKey) {
+  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+
+  const legacyExpected = Deno.env.get("ADMIN_ACCESS_KEY") ?? "";
+  const legacyProvided = req.headers.get("x-admin-key") ?? "";
+  const legacyOk =
+    legacyExpected.length > 0 && legacyProvided === legacyExpected;
+
+  let allowlistOk = false;
+  if (!legacyOk) {
+    const authHeader = req.headers.get("Authorization") ?? "";
+    if (authHeader.startsWith("Bearer ")) {
+      const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data: userData } = await userClient.auth.getUser();
+      const emailLower = userData?.user?.email?.toLowerCase() ?? null;
+      if (emailLower) {
+        const { data: saRow } = await admin
+          .from("super_admins")
+          .select("email, user_id")
+          .eq("email", emailLower)
+          .maybeSingle();
+        if (saRow) {
+          allowlistOk = true;
+          if (saRow.user_id == null) {
+            void admin
+              .from("super_admins")
+              .update({ user_id: userData!.user!.id })
+              .eq("email", emailLower)
+              .is("user_id", null);
+          }
+        }
+      }
+    }
+  }
+
+  if (!legacyOk && !allowlistOk) {
     return json({ ok: false, code: "unauthorized", error: "Unauthorized" });
   }
 
@@ -190,18 +226,10 @@ Deno.serve(async (req) => {
   // uniquePlaces, but the same id may appear in multiple queries'
   // .places arrays as separate objects, so we apply the enrichment by
   // walking every reference instead of relying on object identity.
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   let mesitaLookupError: string | null = null;
   let mesitaMatchCount = 0;
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    mesitaLookupError =
-      "Supabase service-role secrets aren't set — couldn't check which places are already in Mesita.";
-  } else if (uniquePlaces.length > 0) {
+  if (uniquePlaces.length > 0) {
     try {
-      const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
       const ids = uniquePlaces.map((p) => p.id);
       const { data, error } = await admin
         .from("venues")
