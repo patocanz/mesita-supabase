@@ -6,13 +6,8 @@
 // and the admin web builds a https://manager.mesita.ai/unit/<id>/home
 // URL the operator can open.
 //
-// Auth (dual-path during the super_admins migration):
-//   1. Legacy: `x-admin-key` header == `ADMIN_ACCESS_KEY` env.
-//   2. New: caller's JWT email is in public.super_admins.
-//
-// JWT verification stays disabled in config.toml during the cutover so
-// the legacy callers (no JWT) still work. Each request manually verifies
-// the bearer when it's present.
+// Auth: caller's JWT email must be in public.super_admins.
+// verify_jwt = true gates non-bearer callers at the gateway.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -35,44 +30,35 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // Path 1: legacy admin key.
-  const legacyExpected = Deno.env.get("ADMIN_ACCESS_KEY") ?? "";
-  const legacyProvided = req.headers.get("x-admin-key") ?? "";
-  const legacyOk =
-    legacyExpected.length > 0 && legacyProvided === legacyExpected;
-
-  // Path 2: super_admins allowlist via JWT.
-  let allowlistOk = false;
-  if (!legacyOk) {
-    const authHeader = req.headers.get("Authorization") ?? "";
-    if (authHeader.startsWith("Bearer ")) {
-      const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-        global: { headers: { Authorization: authHeader } },
-      });
-      const { data: userData } = await userClient.auth.getUser();
-      const emailLower = userData?.user?.email?.toLowerCase() ?? null;
-      if (emailLower) {
-        const { data: saRow } = await admin
-          .from("super_admins")
-          .select("email, user_id")
-          .eq("email", emailLower)
-          .maybeSingle();
-        if (saRow) {
-          allowlistOk = true;
-          if (saRow.user_id == null) {
-            void admin
-              .from("super_admins")
-              .update({ user_id: userData!.user!.id })
-              .eq("email", emailLower)
-              .is("user_id", null);
-          }
-        }
-      }
-    }
+  const authHeader = req.headers.get("Authorization") ?? "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return json({ ok: false, code: "unauthorized", error: "Missing bearer token" });
   }
-
-  if (!legacyOk && !allowlistOk) {
-    return json({ ok: false, code: "unauthorized", error: "Unauthorized" });
+  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: userData, error: userError } = await userClient.auth.getUser();
+  if (userError || !userData?.user) {
+    return json({ ok: false, code: "unauthorized", error: "Invalid session" });
+  }
+  const emailLower = userData.user.email?.toLowerCase() ?? null;
+  if (!emailLower) {
+    return json({ ok: false, code: "unauthorized", error: "No email on session" });
+  }
+  const { data: saRow } = await admin
+    .from("super_admins")
+    .select("email, user_id")
+    .eq("email", emailLower)
+    .maybeSingle();
+  if (!saRow) {
+    return json({ ok: false, code: "unauthorized", error: "Not a super-admin" });
+  }
+  if (saRow.user_id == null) {
+    void admin
+      .from("super_admins")
+      .update({ user_id: userData.user.id })
+      .eq("email", emailLower)
+      .is("user_id", null);
   }
 
   let body: Body = {};

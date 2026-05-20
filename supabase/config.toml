@@ -197,19 +197,17 @@ verify_jwt = true
 
 # --- Admin (gated by x-admin-key header, not JWT) ---
 #
-# Admin EFs use the per-call admin-key pattern: the admin app stores an
-# operator-entered key in an HttpOnly cookie and forwards it as the
-# `x-admin-key` header on every privileged call. The EFs themselves
-# compare against the ADMIN_ACCESS_KEY Supabase secret. JWT verification
-# is therefore disabled at the gateway — the admin-key check inside the
-# function is the only gate.
+# Admin EFs now sit behind verify_jwt=true. The admin app signs in as a
+# real Supabase user (Google OAuth) and the EFs check the caller's JWT
+# email against public.super_admins. The legacy x-admin-key /
+# ADMIN_ACCESS_KEY pattern was retired in the super_admins cutover.
 
 # Bulk Google Places Text Search proxy. Many queries in, deduped
 # Place IDs out.
 [functions.admin-search-places]
-verify_jwt = false
+verify_jwt = true
 
 # Resolve a Google Place ID to a Mesita venue. Powers the admin console's
 # super-admin deep-link generator.
 [functions.admin-find-venue]
-verify_jwt = false
+verify_jwt = true
