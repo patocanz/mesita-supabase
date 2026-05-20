@@ -133,6 +133,11 @@ verify_jwt = true
 [functions.admin-set-auto-verify]
 verify_jwt = true
 
+# DESTRUCTIVE full reset. Gated on super_admins + a typed "RESET"
+# confirmation. Wipes all data, keeps the super-admin allowlist.
+[functions.admin-reset-database]
+verify_jwt = true
+
 # --- Guest (public reads + authed writes) ---
 
 # Public catalog reads. RLS enforces which venue statuses are visible.
