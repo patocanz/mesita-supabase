@@ -123,6 +123,16 @@ verify_jwt = true
 [functions.admin-whoami]
 verify_jwt = true
 
+# Ownership-verification queue surface for super-admins.
+[functions.admin-list-verifications]
+verify_jwt = true
+
+[functions.admin-decide-verification]
+verify_jwt = true
+
+[functions.admin-set-auto-verify]
+verify_jwt = true
+
 # --- Guest (public reads + authed writes) ---
 
 # Public catalog reads. RLS enforces which venue statuses are visible.
@@ -162,6 +172,14 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.manager-update-unit]
+verify_jwt = true
+
+# Ownership-verification submit + status-poll, called from
+# /unit/<id>/verify on manager.mesita.ai.
+[functions.manager-submit-verification]
+verify_jwt = true
+
+[functions.manager-get-verification]
 verify_jwt = true
 
 # One-shot dashboard bundle: user + venues + active venue + recent tickets.

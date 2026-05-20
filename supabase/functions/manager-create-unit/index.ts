@@ -306,10 +306,10 @@ Deno.serve(async (req) => {
     // beyond "I have a Google placeId", so the venue lands hidden from the
     // public catalog (RLS read filter is status in ('active','lead')) and
     // ineligible for ticket creation (manager-create-ticket gates on
-    // listing_type = 'partner'). Operations / the manager-claim flow flips
-    // these once the caller is verified as the venue's operator.
+    // listing_type = 'partner'). admin-decide-verification flips these
+    // to ('web', 'active') once the caller's ownership is verified.
     listing_type: "unclaimed" as const,
-    status: "pending_review" as const,
+    status: "pending_verification" as const,
     lat: details.location?.latitude ?? null,
     lng: details.location?.longitude ?? null,
     address,
