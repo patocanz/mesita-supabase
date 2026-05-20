@@ -195,19 +195,18 @@ verify_jwt = true
 [functions.manager-get-place]
 verify_jwt = true
 
-# --- Admin (gated by x-admin-key header, not JWT) ---
+# --- Admin (Supabase Auth + super_admins allowlist) ---
 #
-# Admin EFs now sit behind verify_jwt=true. The admin app signs in as a
-# real Supabase user (Google OAuth) and the EFs check the caller's JWT
-# email against public.super_admins. The legacy x-admin-key /
-# ADMIN_ACCESS_KEY pattern was retired in the super_admins cutover.
+# Operators sign in as themselves (Google OAuth via the admin web).
+# Each EF re-checks the caller's JWT email against public.super_admins
+# before doing anything privileged.
 
 # Bulk Google Places Text Search proxy. Many queries in, deduped
 # Place IDs out.
 [functions.admin-search-places]
 verify_jwt = true
 
-# Resolve a Google Place ID to a Mesita venue. Powers the admin console's
-# super-admin deep-link generator.
+# Resolve a Google Place ID to a Mesita venue. Powers the admin
+# console's "open in manager" link generator.
 [functions.admin-find-venue]
 verify_jwt = true

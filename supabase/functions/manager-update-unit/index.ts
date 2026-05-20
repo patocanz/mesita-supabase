@@ -89,60 +89,45 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  // Super-admin paths:
-  //   1. Legacy: `x-super-admin-key` header matches ADMIN_ACCESS_KEY.
-  //      Kept for one cutover so the old admin-web link generator
-  //      doesn't break. Burnt once nothing emits this header.
-  //   2. New: caller's JWT email is in public.super_admins.
-  //
-  // Either path skips the venue_members check. Used by the admin web's
-  // deep-link flow so operators can edit any venue without being on its
-  // team.
-  const ADMIN_ACCESS_KEY = Deno.env.get("ADMIN_ACCESS_KEY");
-  const legacySuperAdminKey = req.headers.get("x-super-admin-key") ?? "";
-  const legacyIsSuperAdmin =
-    ADMIN_ACCESS_KEY != null &&
-    ADMIN_ACCESS_KEY.length > 0 &&
-    legacySuperAdminKey === ADMIN_ACCESS_KEY;
-
+  // Auth: any signed-in user. Super-admin elevation (skips the
+  // venue_members check) is granted when the caller's email is in
+  // public.super_admins.
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  let userId: string | null = null;
-  let isSuperAdmin = legacyIsSuperAdmin;
-  if (!legacyIsSuperAdmin) {
-    const authHeader = req.headers.get("Authorization") ?? "";
-    if (!authHeader.startsWith("Bearer ")) {
-      return json({ ok: false, error: "Missing bearer token" }, 401);
-    }
-    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-      global: { headers: { Authorization: authHeader } },
-    });
-    const { data: userData, error: userError } = await userClient.auth.getUser();
-    if (userError || !userData.user) {
-      return json({ ok: false, error: "Invalid session" }, 401);
-    }
-    userId = userData.user.id;
-    const userEmail = userData.user.email ?? null;
+  const authHeader = req.headers.get("Authorization") ?? "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return json({ ok: false, error: "Missing bearer token" }, 401);
+  }
+  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: userData, error: userError } = await userClient.auth.getUser();
+  if (userError || !userData.user) {
+    return json({ ok: false, error: "Invalid session" }, 401);
+  }
+  const userId = userData.user.id;
+  const userEmail = userData.user.email ?? null;
 
-    // Allowlist check (same shape as manager-get-overview).
-    const emailLower = userEmail?.toLowerCase() ?? null;
-    if (emailLower) {
-      const { data: saRow } = await admin
-        .from("super_admins")
-        .select("email, user_id")
-        .eq("email", emailLower)
-        .maybeSingle();
-      if (saRow) {
-        isSuperAdmin = true;
-        if (saRow.user_id == null) {
-          void admin
-            .from("super_admins")
-            .update({ user_id: userId })
-            .eq("email", emailLower)
-            .is("user_id", null);
-        }
+  // Allowlist check. Lazy-backfill user_id so future audit logs can join
+  // by uuid without re-reading auth.users.
+  let isSuperAdmin = false;
+  const emailLower = userEmail?.toLowerCase() ?? null;
+  if (emailLower) {
+    const { data: saRow } = await admin
+      .from("super_admins")
+      .select("email, user_id")
+      .eq("email", emailLower)
+      .maybeSingle();
+    if (saRow) {
+      isSuperAdmin = true;
+      if (saRow.user_id == null) {
+        void admin
+          .from("super_admins")
+          .update({ user_id: userId })
+          .eq("email", emailLower)
+          .is("user_id", null);
       }
     }
   }
@@ -162,7 +147,7 @@ Deno.serve(async (req) => {
       .from("venue_members")
       .select("role")
       .eq("venue_id", venueId)
-      .eq("manager_id", userId!)
+      .eq("manager_id", userId)
       .maybeSingle();
     if (membershipError) {
       return json({ ok: false, error: `membership_lookup: ${membershipError.message}` }, 500);

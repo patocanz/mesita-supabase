@@ -1,10 +1,10 @@
 // Supabase Edge Function — admin-find-venue
 //
 // Resolves a Google Place ID to a Mesita venue (id + name + slug) when
-// the venue is already onboarded. Used by the admin console's deep-link
-// generator: the admin pastes a Place ID, this EF returns the venue.id,
-// and the admin web builds a https://manager.mesita.ai/unit/<id>/home
-// URL the operator can open.
+// the venue is already onboarded. Used by the admin console's "open in
+// manager" link generator: the admin pastes a Place ID, this EF returns
+// the venue.id, and the admin web builds a
+// https://manager.mesita.ai/unit/<id>/home URL the operator can open.
 //
 // Auth: caller's JWT email must be in public.super_admins.
 // verify_jwt = true gates non-bearer callers at the gateway.
@@ -17,13 +17,13 @@ type Body = { placeId?: unknown };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" });
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
   const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" });
+    return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
@@ -32,18 +32,18 @@ Deno.serve(async (req) => {
 
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, code: "unauthorized", error: "Missing bearer token" });
+    return json({ ok: false, code: "unauthorized", error: "Missing bearer token" }, 401);
   }
   const userClient = createClient(SUPABASE_URL, ANON_KEY, {
     global: { headers: { Authorization: authHeader } },
   });
   const { data: userData, error: userError } = await userClient.auth.getUser();
   if (userError || !userData?.user) {
-    return json({ ok: false, code: "unauthorized", error: "Invalid session" });
+    return json({ ok: false, code: "unauthorized", error: "Invalid session" }, 401);
   }
   const emailLower = userData.user.email?.toLowerCase() ?? null;
   if (!emailLower) {
-    return json({ ok: false, code: "unauthorized", error: "No email on session" });
+    return json({ ok: false, code: "unauthorized", error: "No email on session" }, 401);
   }
   const { data: saRow } = await admin
     .from("super_admins")
@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
     .eq("email", emailLower)
     .maybeSingle();
   if (!saRow) {
-    return json({ ok: false, code: "unauthorized", error: "Not a super-admin" });
+    return json({ ok: false, code: "unauthorized", error: "Not a super-admin" }, 403);
   }
   if (saRow.user_id == null) {
     void admin
@@ -65,12 +65,12 @@ Deno.serve(async (req) => {
   try {
     body = (await req.json()) as Body;
   } catch {
-    return json({ ok: false, error: "Invalid JSON" });
+    return json({ ok: false, error: "Invalid JSON" }, 400);
   }
   const placeId =
     typeof body.placeId === "string" ? body.placeId.trim() : "";
   if (!placeId) {
-    return json({ ok: false, error: "placeId is required" });
+    return json({ ok: false, error: "placeId is required" }, 400);
   }
 
   const { data, error } = await admin
@@ -79,7 +79,7 @@ Deno.serve(async (req) => {
     .eq("google_place_id", placeId)
     .maybeSingle();
   if (error) {
-    return json({ ok: false, error: `lookup_failed: ${error.message}` });
+    return json({ ok: false, error: `lookup_failed: ${error.message}` }, 500);
   }
   if (!data) {
     return json({ ok: true, venue: null });
