@@ -98,40 +98,30 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // The caller must be a venue_members row on this venue (set during
-  // manager-create-unit) and the venue must currently be in
-  // pending_verification — submitting verification for an already-active
-  // venue is a no-op.
-  const { data: membership } = await admin
-    .from("venue_members")
-    .select("role")
-    .eq("venue_id", venueId)
-    .eq("manager_id", userId)
-    .maybeSingle();
-  if (!membership) {
-    return json({ ok: false, error: "Not a member of this venue" }, 403);
-  }
-
+  // The venue must exist and must NOT already have a verified owner.
+  // The caller is staking a claim — they aren't a venue_members row yet
+  // (and won't be until admin-decide-verification approves them).
   const { data: venue, error: venueError } = await admin
     .from("venues")
-    .select("id, status, phone")
+    .select("id, phone")
     .eq("id", venueId)
     .maybeSingle();
   if (venueError || !venue) {
     return json({ ok: false, error: "Venue not found" }, 404);
   }
-  // Accept either of the two "claimed but not verified" statuses. The
-  // older manager-create-unit deploys still write 'pending_review';
-  // newer ones write 'pending_verification'. Both should be verifiable.
-  if (
-    venue.status !== "pending_verification" &&
-    venue.status !== "pending_review"
-  ) {
+  const { data: existingOwner } = await admin
+    .from("venue_members")
+    .select("manager_id")
+    .eq("venue_id", venueId)
+    .eq("role", "owner")
+    .maybeSingle();
+  if (existingOwner) {
     return json(
       {
         ok: false,
-        code: "venue_not_pending",
-        error: "This venue is not awaiting verification.",
+        code: "venue_already_owned",
+        error:
+          "This venue already has a verified owner. Use the contact / report-fraud flow instead.",
       },
       409,
     );
@@ -177,24 +167,37 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Auto-approved → flip venue to ('web', 'active') so the manager can
-  // start managing immediately. Failure here is bad: we have an approved
-  // verification but the venue is still pending. Surface it loudly.
+  // Auto-approved → insert the owning venue_members row. The venue
+  // itself was already active+web from manager-create-unit; the only
+  // missing piece is the membership that lets this manager manage it.
   if (autoVerify) {
-    const { error: venueFlipError } = await admin
-      .from("venues")
-      .update({ status: "active", listing_type: "web" })
-      .eq("id", venueId);
-    if (venueFlipError) {
+    const { error: memberError } = await admin.from("venue_members").insert({
+      venue_id: venueId,
+      manager_id: userId,
+      role: "owner",
+    });
+    if (memberError) {
       console.error(
-        "[manager-submit-verification] venue flip after auto-approve:",
-        venueFlipError.message,
+        "[manager-submit-verification] venue_members insert after auto-approve:",
+        memberError.message,
       );
+      // Roll the verification back so the caller can retry instead of
+      // sitting in a half-approved state. A unique-violation here
+      // means a parallel claim won; that's fine — surface it.
+      await admin
+        .from("venue_verifications")
+        .update({
+          status: "pending",
+          decided_at: null,
+          decided_by: null,
+          decided_via: null,
+        })
+        .eq("id", verification.id);
       return json(
         {
           ok: false,
-          code: "venue_flip_failed",
-          error: `Verification approved but venue could not be activated: ${venueFlipError.message}`,
+          code: "ownership_grant_failed",
+          error: `Verification approved but ownership could not be granted: ${memberError.message}`,
         },
         500,
       );

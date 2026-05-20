@@ -182,6 +182,12 @@ verify_jwt = true
 [functions.manager-get-verification]
 verify_jwt = true
 
+# State-aware Place ID → Mesita venue lookup. Powers the /add page's
+# inline result card (not_in_mesita / web_listed_unclaimed / pending /
+# verified_partner).
+[functions.manager-lookup-venue]
+verify_jwt = true
+
 # One-shot dashboard bundle: user + venues + active venue + recent tickets.
 [functions.manager-get-overview]
 verify_jwt = true

@@ -302,14 +302,14 @@ Deno.serve(async (req) => {
     category: synth.category ?? details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
     vibe: synth.vibe ?? null,
     price_level: synth.price_level ?? priceLevelFromGoogle(details.priceLevel),
-    // Defaults are deliberately conservative: the caller proved nothing
-    // beyond "I have a Google placeId", so the venue lands hidden from the
-    // public catalog (RLS read filter is status in ('active','lead')) and
-    // ineligible for ticket creation (manager-create-ticket gates on
-    // listing_type = 'partner'). admin-decide-verification flips these
-    // to ('web', 'active') once the caller's ownership is verified.
-    listing_type: "unclaimed" as const,
-    status: "pending_verification" as const,
+    // Created venues are publicly discoverable but not yet claimed by
+    // anyone. RLS shows status in ('active','lead'); ticket creation
+    // gates on listing_type='partner' so unclaimed web listings stay
+    // bookable-blocked until the owner verifies + upgrades. The owning
+    // venue_members row is NOT created here — that only lands when
+    // admin-decide-verification approves an ownership claim.
+    listing_type: "web" as const,
+    status: "active" as const,
     lat: details.location?.latitude ?? null,
     lng: details.location?.longitude ?? null,
     address,
@@ -387,15 +387,10 @@ Deno.serve(async (req) => {
     );
   }
 
-  const { error: memberError } = await admin.from("venue_members").insert({
-    venue_id: venue.id,
-    manager_id: userId,
-    role: "owner",
-  });
-  if (memberError) {
-    await admin.from("venues").delete().eq("id", venue.id);
-    return json({ ok: false, error: `member_link: ${memberError.message}` }, 500);
-  }
+  // Intentionally no venue_members insert. The caller becomes the
+  // owner only when admin-decide-verification approves their ownership
+  // claim — until then, the venue is publicly listed but unowned, and
+  // the caller can't manage anything on it.
 
   return json(
     {
