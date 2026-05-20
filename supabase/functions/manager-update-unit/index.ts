@@ -89,19 +89,31 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  // Auth caller.
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
+  // Super-admin bypass via x-super-admin-key (matched against ADMIN_ACCESS_KEY).
+  // Skips JWT + venue_members membership checks — used by the admin web's
+  // deep-link flow so operators can edit any venue without being on its team.
+  const ADMIN_ACCESS_KEY = Deno.env.get("ADMIN_ACCESS_KEY");
+  const superAdminKey = req.headers.get("x-super-admin-key") ?? "";
+  const isSuperAdmin =
+    ADMIN_ACCESS_KEY != null &&
+    ADMIN_ACCESS_KEY.length > 0 &&
+    superAdminKey === ADMIN_ACCESS_KEY;
+
+  let userId: string | null = null;
+  if (!isSuperAdmin) {
+    const authHeader = req.headers.get("Authorization") ?? "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return json({ ok: false, error: "Missing bearer token" }, 401);
+    }
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userError } = await userClient.auth.getUser();
+    if (userError || !userData.user) {
+      return json({ ok: false, error: "Invalid session" }, 401);
+    }
+    userId = userData.user.id;
   }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const userId = userData.user.id;
 
   // Parse + validate.
   let body: UpdateBody = {};
@@ -113,21 +125,23 @@ Deno.serve(async (req) => {
   const venueId = (body.id ?? "").toString().trim();
   if (!venueId) return json({ ok: false, error: "id is required" }, 400);
 
-  // Authorisation: must be a member of this venue.
+  // Authorisation: super-admin skips, regular users must be a venue member.
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { data: membership, error: membershipError } = await admin
-    .from("venue_members")
-    .select("role")
-    .eq("venue_id", venueId)
-    .eq("manager_id", userId)
-    .maybeSingle();
-  if (membershipError) {
-    return json({ ok: false, error: `membership_lookup: ${membershipError.message}` }, 500);
-  }
-  if (!membership) {
-    return json({ ok: false, error: "Not a member of this venue" }, 403);
+  if (!isSuperAdmin) {
+    const { data: membership, error: membershipError } = await admin
+      .from("venue_members")
+      .select("role")
+      .eq("venue_id", venueId)
+      .eq("manager_id", userId!)
+      .maybeSingle();
+    if (membershipError) {
+      return json({ ok: false, error: `membership_lookup: ${membershipError.message}` }, 500);
+    }
+    if (!membership) {
+      return json({ ok: false, error: "Not a member of this venue" }, 403);
+    }
   }
 
   // Build the update payload from the whitelist. Missing keys are not

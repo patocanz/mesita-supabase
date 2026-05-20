@@ -29,19 +29,35 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
+  // Super-admin bypass. The admin web sends `x-super-admin-key` (matching
+  // ADMIN_ACCESS_KEY) when it's deep-linking an operator into a venue they
+  // don't own. We skip JWT + venue_members checks and return the requested
+  // venue alone — the sidebar's "all my venues" feature doesn't apply when
+  // there's no real user to attribute to.
+  const ADMIN_ACCESS_KEY = Deno.env.get("ADMIN_ACCESS_KEY");
+  const superAdminKey = req.headers.get("x-super-admin-key") ?? "";
+  const isSuperAdmin =
+    ADMIN_ACCESS_KEY != null &&
+    ADMIN_ACCESS_KEY.length > 0 &&
+    superAdminKey === ADMIN_ACCESS_KEY;
+
+  let userId: string | null = null;
+  let userEmail: string | null = null;
+  if (!isSuperAdmin) {
+    const authHeader = req.headers.get("Authorization") ?? "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return json({ ok: false, error: "Missing bearer token" }, 401);
+    }
+    const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: userData, error: userError } = await userClient.auth.getUser();
+    if (userError || !userData.user) {
+      return json({ ok: false, error: "Invalid session" }, 401);
+    }
+    userId = userData.user.id;
+    userEmail = userData.user.email ?? null;
   }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const userId = userData.user.id;
-  const userEmail = userData.user.email ?? null;
 
   let body: Body = {};
   try {
@@ -58,20 +74,49 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // Pull every venue the caller is a member of, with the role on each row.
-  const memberRows = await admin
-    .from("venue_members")
-    .select(`role, venue:venues(${VENUE_COLUMNS})`)
-    .eq("manager_id", userId)
-    .order("created_at", { ascending: false });
-  if (memberRows.error) {
-    return json({ ok: false, error: memberRows.error.message }, 500);
+  // Super-admin path: skip venue_members. Require an explicit activeUnitId
+  // (the link generator always supplies one) and return a single-row list.
+  type VenueRow = Record<string, unknown> & { id: string };
+  let venues: VenueRow[];
+  if (isSuperAdmin) {
+    if (!requestedUnitId) {
+      return json(
+        { ok: false, error: "super-admin overview requires activeUnitId" },
+        400,
+      );
+    }
+    const venueRow = await admin
+      .from("venues")
+      .select(VENUE_COLUMNS)
+      .eq("id", requestedUnitId)
+      .maybeSingle();
+    if (venueRow.error) {
+      return json({ ok: false, error: venueRow.error.message }, 500);
+    }
+    if (!venueRow.data) {
+      return json({ ok: false, error: "Venue not found" }, 404);
+    }
+    // Tag as owner so any downstream UI that gates on role still works —
+    // super-admin gets the broadest permission set the venue role enum
+    // can express. (The frontend MyVenue type only knows owner|manager|staff.)
+    venues = [
+      { ...(venueRow.data as Record<string, unknown>), my_role: "owner" } as VenueRow,
+    ];
+  } else {
+    // Pull every venue the caller is a member of, with the role on each row.
+    const memberRows = await admin
+      .from("venue_members")
+      .select(`role, venue:venues(${VENUE_COLUMNS})`)
+      .eq("manager_id", userId!)
+      .order("created_at", { ascending: false });
+    if (memberRows.error) {
+      return json({ ok: false, error: memberRows.error.message }, 500);
+    }
+    type MemberRow = { role: string; venue: Record<string, unknown> | null };
+    venues = ((memberRows.data ?? []) as MemberRow[])
+      .filter((r) => r.venue != null)
+      .map((r) => ({ ...r.venue!, my_role: r.role }) as VenueRow);
   }
-
-  type MemberRow = { role: string; venue: Record<string, unknown> | null };
-  const venues = ((memberRows.data ?? []) as MemberRow[])
-    .filter((r) => r.venue != null)
-    .map((r) => ({ ...r.venue!, my_role: r.role }));
 
   // Pick the active unit. Honour the requested id when it matches a
   // membership; otherwise fall back to the first venue.
@@ -104,7 +149,9 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    user: { id: userId, email: userEmail },
+    user: isSuperAdmin
+      ? { id: "super-admin", email: null }
+      : { id: userId!, email: userEmail },
     venues,
     active: active
       ? {
