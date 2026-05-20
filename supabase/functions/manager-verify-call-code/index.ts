@@ -5,9 +5,14 @@
 // 6-digit OTP, hashed it, returned the plaintext in mock mode), the
 // AI bot called the venue's Google-listed phone, the operator
 // (manager) heard the code and typed it into the UI. This EF takes
-// the typed code, compares its hash against the stored one, and on
-// match marks the verification approved + inserts the venue_members
-// owner row.
+// the typed code, compares its hash against the stored one.
+//
+// On match the outcome depends on app_settings.auto_verify_ai_call:
+//   true (default): mark approved + insert venue_members owner row →
+//                   operator lands on the unit immediately.
+//   false:          stamp payload.codeVerifiedAt, leave status='pending'
+//                   → row appears in the admin queue with the
+//                   "code-verified" badge, awaiting a human decision.
 //
 // Auth: any signed-in user. The EF only accepts codes for rows where
 // requester_id === auth.user.id — managers can't redeem codes from
@@ -124,8 +129,42 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Right code → approve + grant ownership.
+  // Right code → branch on auto_verify_ai_call.
+  const { data: settings } = await admin
+    .from("app_settings")
+    .select("auto_verify_ai_call")
+    .eq("id", 1)
+    .maybeSingle();
+  const autoVerify = settings?.auto_verify_ai_call !== false;
   const now = new Date().toISOString();
+
+  if (!autoVerify) {
+    // Manual-review path: stamp codeVerifiedAt on the payload so the
+    // admin queue can show "code verified, awaiting review" without
+    // changing status. Leave the row pending; ownership is granted
+    // (or not) by admin-decide-verification.
+    const nextPayload = {
+      ...(verification.payload as Record<string, unknown>),
+      codeVerifiedAt: now,
+    };
+    const { error: payloadError } = await admin
+      .from("venue_verifications")
+      .update({ payload: nextPayload })
+      .eq("id", verificationId);
+    if (payloadError) {
+      return json(
+        { ok: false, error: `verification_update: ${payloadError.message}` },
+        500,
+      );
+    }
+    return json({
+      ok: true,
+      venueId: verification.venue_id,
+      awaitingAdmin: true,
+    });
+  }
+
+  // Auto-approve path (default): mark approved + grant ownership.
   const { error: updateError } = await admin
     .from("venue_verifications")
     .update({
@@ -166,7 +205,11 @@ Deno.serve(async (req) => {
     );
   }
 
-  return json({ ok: true, venueId: verification.venue_id });
+  return json({
+    ok: true,
+    venueId: verification.venue_id,
+    awaitingAdmin: false,
+  });
 });
 
 async function sha256Hex(input: string): Promise<string> {

@@ -8,10 +8,10 @@
 //               caller in `mockCode` (TODO: drop mockCode once Twilio
 //               is wired; phase 2 of this EF, manager-verify-call-code,
 //               accepts the code and approves). Insert lands as
-//               status='pending' regardless of auto-mode — the code
-//               entry IS the verification.
+//               status='pending' regardless — code entry IS the
+//               verification, gated by auto_verify_ai_call downstream.
 //   - video:    stores videoUrl in payload, auto-approves if
-//               app_settings.auto_verify_venues is true (admin queue
+//               app_settings.auto_verify_video is true (admin queue
 //               otherwise).
 //
 // Auto-approve path inserts the venue_members owner row in the same EF
@@ -138,15 +138,16 @@ Deno.serve(async (req) => {
   }
 
   // ai_call has its own confirmation step (manager-verify-call-code),
-  // so it ignores the auto-mode flag — the code entry IS the
-  // verification. video / postcard honour auto-mode.
+  // so it ignores auto-mode at submit time — the code entry IS the
+  // verification, gated by auto_verify_ai_call over there. video
+  // honours auto_verify_video right here.
   const { data: settings } = await admin
     .from("app_settings")
-    .select("auto_verify_venues")
+    .select("auto_verify_video")
     .eq("id", 1)
     .maybeSingle();
   const autoVerify =
-    method !== "ai_call" && settings?.auto_verify_venues === true;
+    method === "video" && settings?.auto_verify_video === true;
 
   // Dedup: drop any prior pending claim by this caller on this venue
   // before inserting the new one. The partial unique index in

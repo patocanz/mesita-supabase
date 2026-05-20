@@ -1,9 +1,15 @@
 // Supabase Edge Function — admin-set-auto-verify
 //
-// Toggles public.app_settings.auto_verify_venues. When true, new
-// verification requests skip the admin queue and land as approved
-// (decided_via='auto'). The admin web's /verifications page exposes
-// this as a single toggle at the top.
+// Toggles one of the per-method auto-confirm flags on
+// public.app_settings:
+//
+//   ai_call → auto_verify_ai_call (default true). When true the OTP
+//             code-entry EF grants ownership on correct code. When
+//             false the row sits in the admin queue tagged
+//             "code-verified, awaiting manual approval".
+//   video   → auto_verify_video   (default false). When true a
+//             submitted video URL grants ownership immediately. When
+//             false the row goes to the admin queue for human review.
 //
 // Auth: caller's JWT email must be in public.super_admins.
 
@@ -11,7 +17,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 
-type Body = { enabled?: boolean };
+type Method = "ai_call" | "video";
+type Body = { method?: Method; enabled?: boolean };
+
+const COLUMN: Record<Method, "auto_verify_ai_call" | "auto_verify_video"> = {
+  ai_call: "auto_verify_ai_call",
+  video: "auto_verify_video",
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -56,22 +68,25 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Not a super-admin" }, 403);
   }
 
-  // Body.
   let body: Body = {};
   try {
     body = (await req.json()) as Body;
   } catch {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
+  if (body.method !== "ai_call" && body.method !== "video") {
+    return json({ ok: false, error: "method must be ai_call | video" }, 400);
+  }
   if (typeof body.enabled !== "boolean") {
     return json({ ok: false, error: "enabled must be a boolean" }, 400);
   }
 
+  const column = COLUMN[body.method];
   const { data, error } = await admin
     .from("app_settings")
-    .update({ auto_verify_venues: body.enabled, updated_by: userId })
+    .update({ [column]: body.enabled, updated_by: userId })
     .eq("id", 1)
-    .select("auto_verify_venues, updated_at")
+    .select("auto_verify_ai_call, auto_verify_video, updated_at")
     .single();
   if (error) {
     return json(
@@ -82,7 +97,8 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    autoVerifyVenues: data.auto_verify_venues,
+    autoVerifyAiCall: data.auto_verify_ai_call,
+    autoVerifyVideo: data.auto_verify_video,
     autoVerifyUpdatedAt: data.updated_at,
   });
 });
