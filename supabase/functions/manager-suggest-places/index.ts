@@ -26,6 +26,24 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
 
+// Restrict Google autocomplete to F&B / nightlife primary types so
+// non-hospitality matches (tire shops, mechanics, pharmacies, hardware
+// stores…) don't pollute the picker. Google's API caps this at 5 from
+// Table A, so we pick the broadest 5 that cover Mesita's universe.
+// Trade-off: cuisine-specific Table A types (italian_restaurant,
+// mexican_restaurant, sushi_restaurant, …) get filtered out because
+// each place has exactly one primary type. The Mesita-side ILIKE
+// fallback below still surfaces them once they've been onboarded —
+// and a new cuisine-specific place can be added by pasting the Google
+// Place ID directly through manager-create-unit.
+const MESITA_PRIMARY_TYPES = [
+  "restaurant",
+  "bar",
+  "cafe",
+  "night_club",
+  "bakery",
+];
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -152,7 +170,11 @@ async function fetchGooglePredictions(
       "Content-Type": "application/json",
       "X-Goog-Api-Key": apiKey,
     },
-    body: JSON.stringify({ input, sessionToken }),
+    body: JSON.stringify({
+      input,
+      sessionToken,
+      includedPrimaryTypes: MESITA_PRIMARY_TYPES,
+    }),
   });
 
   if (!r.ok) {
