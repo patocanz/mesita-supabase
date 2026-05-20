@@ -174,12 +174,16 @@ verify_jwt = true
 [functions.manager-update-unit]
 verify_jwt = true
 
-# Ownership-verification submit + status-poll, called from
-# /unit/<id>/verify on manager.mesita.ai.
+# Ownership-verification submit + status-poll, called from /add on
+# manager.mesita.ai. manager-verify-call-code is phase 2 of the
+# ai_call OTP flow (manager-submit-verification generates the code).
 [functions.manager-submit-verification]
 verify_jwt = true
 
 [functions.manager-get-verification]
+verify_jwt = true
+
+[functions.manager-verify-call-code]
 verify_jwt = true
 
 # State-aware Place ID → Mesita venue lookup. Powers the /add page's

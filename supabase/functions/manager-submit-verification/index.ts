@@ -1,20 +1,26 @@
 // Supabase Edge Function — manager-submit-verification
 //
-// Manager submits ownership verification for a venue they created.
-// Three methods, all written to public.venue_verifications:
+// Manager submits ownership verification for an unclaimed venue. Two
+// methods today:
 //
-//   - ai_call:  automated phone call to the Google-listed venue phone
-//               with a 6-digit code (MOCKED for v0 — we don't actually
-//               place the call, just record the method choice).
-//   - video:    manager pastes a URL to a ≤1-minute walkthrough video.
-//   - postcard: Google-style mailed code (MOCKED — no postcard sent).
+//   - ai_call:  generates a 6-digit OTP code, stores the SHA-256 hash
+//               in payload.codeHash, returns the plain code to the
+//               caller in `mockCode` (TODO: drop mockCode once Twilio
+//               is wired; phase 2 of this EF, manager-verify-call-code,
+//               accepts the code and approves). Insert lands as
+//               status='pending' regardless of auto-mode — the code
+//               entry IS the verification.
+//   - video:    stores videoUrl in payload, auto-approves if
+//               app_settings.auto_verify_venues is true (admin queue
+//               otherwise).
 //
-// If public.app_settings.auto_verify_venues is true, the row is
-// inserted with status='approved' and the venue is flipped to
-// ('web', 'active') in the same EF call. Otherwise it lands as
-// 'pending' and an admin reviews in admin.mesita.ai/verifications.
+// Auto-approve path inserts the venue_members owner row in the same EF
+// call. The caller does NOT have to be an existing venue_members row;
+// they're staking a claim.
 //
-// Self-contained: own JWT verification, own DB writes via service role.
+// Dedup: any existing pending row for (venue_id, requester_id) is
+// deleted before the insert, so submitting again replaces the prior
+// claim. A partial unique index (migration 0014) catches races.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -26,8 +32,7 @@ type Body = {
   venueId?: string;
   method?: Method;
   requesterEmail?: string;
-  // Method-specific:
-  videoUrl?: string; // method === 'video'
+  videoUrl?: string;
 };
 
 Deno.serve(async (req) => {
@@ -43,7 +48,6 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  // Auth.
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
     return json({ ok: false, error: "Missing bearer token" }, 401);
@@ -57,7 +61,6 @@ Deno.serve(async (req) => {
   }
   const userId = userData.user.id;
 
-  // Body.
   let body: Body = {};
   try {
     body = (await req.json()) as Body;
@@ -81,7 +84,6 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Method-specific payload + validation.
   const payload: Record<string, unknown> = {};
   if (method === "video") {
     const videoUrl = (body.videoUrl ?? "").trim();
@@ -98,9 +100,6 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // The venue must exist and must NOT already have a verified owner.
-  // The caller is staking a claim — they aren't a venue_members row yet
-  // (and won't be until admin-decide-verification approves them).
   const { data: venue, error: venueError } = await admin
     .from("venues")
     .select("id, phone")
@@ -127,22 +126,39 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Capture the Google-listed phone the call would target (or null) so
-  // future audits see what the venue's phone WAS at submit time.
+  // ai_call: generate code + hash. Plain code is returned only when
+  // Twilio isn't configured (mock mode); production gets the code via
+  // the actual phone call.
+  let mockCode: string | null = null;
   if (method === "ai_call") {
     payload.phoneCalled = venue.phone ?? null;
+    const code = randomSixDigits();
+    payload.codeHash = await sha256Hex(code);
+    if (!Deno.env.get("TWILIO_AUTH_TOKEN")) mockCode = code;
   }
 
-  // Read auto-verify flag.
+  // ai_call has its own confirmation step (manager-verify-call-code),
+  // so it ignores the auto-mode flag — the code entry IS the
+  // verification. video / postcard honour auto-mode.
   const { data: settings } = await admin
     .from("app_settings")
     .select("auto_verify_venues")
     .eq("id", 1)
     .maybeSingle();
-  const autoVerify = settings?.auto_verify_venues === true;
+  const autoVerify =
+    method !== "ai_call" && settings?.auto_verify_venues === true;
 
-  // Insert the verification row. If auto-mode is on, mark it approved
-  // up-front so the admin queue stays empty.
+  // Dedup: drop any prior pending claim by this caller on this venue
+  // before inserting the new one. The partial unique index in
+  // migration 0014 catches concurrent inserts; this avoids the
+  // friendly-error path under sequential resubmits.
+  await admin
+    .from("venue_verifications")
+    .delete()
+    .eq("venue_id", venueId)
+    .eq("requester_id", userId)
+    .eq("status", "pending");
+
   const now = new Date().toISOString();
   const insertRow = {
     venue_id: venueId,
@@ -167,9 +183,6 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Auto-approved → insert the owning venue_members row. The venue
-  // itself was already active+web from manager-create-unit; the only
-  // missing piece is the membership that lets this manager manage it.
   if (autoVerify) {
     const { error: memberError } = await admin.from("venue_members").insert({
       venue_id: venueId,
@@ -177,13 +190,6 @@ Deno.serve(async (req) => {
       role: "owner",
     });
     if (memberError) {
-      console.error(
-        "[manager-submit-verification] venue_members insert after auto-approve:",
-        memberError.message,
-      );
-      // Roll the verification back so the caller can retry instead of
-      // sitting in a half-approved state. A unique-violation here
-      // means a parallel claim won; that's fine — surface it.
       await admin
         .from("venue_verifications")
         .update({
@@ -204,5 +210,23 @@ Deno.serve(async (req) => {
     }
   }
 
-  return json({ ok: true, verification });
+  return json({ ok: true, verification, mockCode });
 });
+
+// ── helpers ───────────────────────────────────────────────────────────
+
+function randomSixDigits(): string {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  // Modulo 1,000,000 is acceptable for OTP — small bias is irrelevant
+  // for a code that lives ~5 minutes and isn't a long-term secret.
+  return (buf[0] % 1_000_000).toString().padStart(6, "0");
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
