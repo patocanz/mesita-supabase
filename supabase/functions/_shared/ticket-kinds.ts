@@ -22,3 +22,22 @@ export const STORY_KINDS = new Set([
 export const FORMAL_STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
 
 export const INFORMAL_STORY_KINDS = new Set(["s_dp_sf", "r_s_dp_sf"]);
+
+export const RESERVATION_KINDS = new Set([
+  "r_p_c",
+  "r_s_p_sf_c",
+  "r_dp",
+  "r_s_dp_sf",
+]);
+
+// Every kind that produces a ticket row (i.e. everything except `none`).
+export const ACTIONABLE_KINDS = new Set([
+  "p_c",
+  "s_p_sf_c",
+  "r_p_c",
+  "r_s_p_sf_c",
+  "dp",
+  "s_dp_sf",
+  "r_dp",
+  "r_s_dp_sf",
+]);
