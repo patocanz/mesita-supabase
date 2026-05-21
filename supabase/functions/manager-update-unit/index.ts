@@ -78,6 +78,17 @@ type UrlField = (typeof URL_FIELDS)[number];
 
 const EDITABLE_STATUSES = new Set(["active", "paused", "archived"]);
 
+// Plan catalog the EF accepts. formal_ultra / informal_ultra are kept
+// for backwards compatibility with rows written before the tier was
+// retired — new plan picks come in as free | formal_pro | informal_pro.
+const VALID_PLANS = new Set([
+  "free",
+  "formal_pro",
+  "formal_ultra",
+  "informal_pro",
+  "informal_ultra",
+]);
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
@@ -188,14 +199,7 @@ Deno.serve(async (req) => {
   }
   if ("plan" in body) {
     const p = body.plan;
-    const validPlans = new Set([
-      "free",
-      "formal_pro",
-      "formal_ultra",
-      "informal_pro",
-      "informal_ultra",
-    ]);
-    if (!p || !validPlans.has(p)) {
+    if (!p || !VALID_PLANS.has(p)) {
       return json(
         {
           ok: false,
