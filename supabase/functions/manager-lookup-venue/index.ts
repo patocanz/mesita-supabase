@@ -16,6 +16,18 @@
 //   verified_partner         — venue exists and has an owner. Caller
 //                              must use the contact / report-fraud flow.
 //
+// Every claim-able state (web_listed_unclaimed, pending_by_me,
+// pending_by_other) also carries a `methods` block describing which
+// verification paths the UI should surface:
+//
+//   methods.phone   — available when venues.phone is non-null.
+//   methods.email   — available when venues.email is on-domain (its
+//                     host matches the website_url host, ±www. and
+//                     subdomain).
+//   methods.manual  — always available. Region-bucketed contact details
+//                     so the UI can pick WhatsApp (LatAm), SMS (US), or
+//                     email-only based on the venue's country.
+//
 // Auth: any signed-in user.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -25,7 +37,106 @@ import { corsPreflight, json } from "../_shared/http.ts";
 type Body = { placeId?: string };
 
 const VENUE_COLUMNS =
-  "id, slug, name, status, listing_type, address, phone, photos, category, vibe, cashback_percent, created_at, updated_at";
+  "id, slug, name, status, listing_type, address, phone, email, website_url, country, photos, category, vibe, cashback_percent, created_at, updated_at";
+
+type Region = "mx_latam" | "us" | "other";
+
+const LATAM_COUNTRIES = new Set([
+  "mexico",
+  "argentina",
+  "colombia",
+  "chile",
+  "peru",
+  "uruguay",
+  "brazil",
+  "ecuador",
+  "bolivia",
+  "paraguay",
+  "venezuela",
+  "guatemala",
+  "costa rica",
+  "panama",
+  "dominican republic",
+  "el salvador",
+  "honduras",
+  "nicaragua",
+  "puerto rico",
+]);
+
+const OPS_EMAIL = "hello@mesita.ai";
+
+type VenueRow = {
+  id: string;
+  phone: string | null;
+  email: string | null;
+  website_url: string | null;
+  country: string | null;
+};
+
+type MethodsBlock = {
+  phone: { available: boolean; displayPhone: string | null };
+  email: { available: boolean; displayEmail: string | null };
+  manual: {
+    region: Region;
+    whatsapp: string | null;
+    sms: string | null;
+    email: string;
+  };
+};
+
+function regionForCountry(country: string | null): Region {
+  if (!country) return "other";
+  const c = country.toLowerCase();
+  if (c === "united states" || c === "us" || c === "canada" || c === "ca") {
+    return "us";
+  }
+  if (LATAM_COUNTRIES.has(c)) return "mx_latam";
+  return "other";
+}
+
+// True when the email's domain matches the website's hostname, ignoring
+// "www." on either side. Subdomain matches count in both directions so
+// `hola@reservas.casaluminar.mx` against `https://casaluminar.mx` passes.
+function isOnDomain(email: string, websiteUrl: string): boolean {
+  const at = email.indexOf("@");
+  if (at < 1) return false;
+  const emailHost = email.slice(at + 1).toLowerCase();
+  let siteHost: string;
+  try {
+    siteHost = new URL(websiteUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const stripWww = (h: string) => h.replace(/^www\./, "");
+  const a = stripWww(emailHost);
+  const b = stripWww(siteHost);
+  return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+}
+
+function methodsFor(venue: VenueRow): MethodsBlock {
+  const phoneOk = !!venue.phone;
+  const emailOk =
+    !!venue.email && !!venue.website_url && isOnDomain(venue.email, venue.website_url);
+  const region = regionForCountry(venue.country);
+  const whatsapp = (Deno.env.get("MESITA_OPS_WHATSAPP") ?? "").trim() || null;
+  const sms = (Deno.env.get("MESITA_OPS_SMS") ?? "").trim() || null;
+  return {
+    phone: {
+      available: phoneOk,
+      displayPhone: phoneOk ? venue.phone : null,
+    },
+    email: {
+      available: emailOk,
+      displayEmail: emailOk ? venue.email : null,
+    },
+    manual: {
+      region,
+      whatsapp: region === "mx_latam" ? whatsapp : null,
+      sms: region === "us" ? sms : null,
+      email: OPS_EMAIL,
+    },
+  };
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -91,8 +202,6 @@ Deno.serve(async (req) => {
     .maybeSingle();
 
   if (owner) {
-    // Pull the owner's email from auth.users so the UI can surface
-    // "owned by X" + offer Contact / Report fraud.
     const { data: ownerUser } = await admin.auth.admin.getUserById(
       owner.manager_id,
     );
@@ -107,7 +216,11 @@ Deno.serve(async (req) => {
     });
   }
 
-  // 3. No owner yet — look for pending verifications.
+  // From here on the venue is claim-able. Compute the methods block
+  // once so all three pending/unclaimed branches return it identically.
+  const methods = methodsFor(venue as VenueRow);
+
+  // 3. Pending claim by this caller.
   const { data: pendingForMe } = await admin
     .from("venue_verifications")
     .select(
@@ -125,11 +238,11 @@ Deno.serve(async (req) => {
       state: "pending_by_me",
       venue,
       verification: pendingForMe,
+      methods,
     });
   }
 
-  // 4. Pending claim from a different user (informational — caller can
-  // still submit their own).
+  // 4. Pending claim from a different user.
   const { data: pendingByOther } = await admin
     .from("venue_verifications")
     .select("id")
@@ -139,9 +252,9 @@ Deno.serve(async (req) => {
     .limit(1)
     .maybeSingle();
   if (pendingByOther) {
-    return json({ ok: true, state: "pending_by_other", venue });
+    return json({ ok: true, state: "pending_by_other", venue, methods });
   }
 
   // 5. Default: unclaimed and unmolested.
-  return json({ ok: true, state: "web_listed_unclaimed", venue });
+  return json({ ok: true, state: "web_listed_unclaimed", venue, methods });
 });

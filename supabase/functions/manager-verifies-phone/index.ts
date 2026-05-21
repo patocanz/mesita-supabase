@@ -1,21 +1,16 @@
-// Supabase Edge Function — manager-verify-call-code
+// Supabase Edge Function — manager-verifies-phone
 //
-// Phase 2 of the ai_call verification method. Manager submitted the
-// initial request via manager-submit-verification (which generated a
-// 6-digit OTP, hashed it, returned the plaintext in mock mode), the
-// AI bot called the venue's Google-listed phone, the operator
-// (manager) heard the code and typed it into the UI. This EF takes
-// the typed code, compares its hash against the stored one.
+// Phase 2 of the automatic-phone path. The operator received the 6-digit
+// code via the call/SMS (or saw it in the mock banner) and typed it
+// into the UI. This EF hash-compares against the stored payload.codeHash
+// and either:
 //
-// On match the outcome depends on app_settings.auto_verify_ai_call:
-//   true (default): mark approved + insert venue_members owner row →
-//                   operator lands on the unit immediately.
-//   false:          stamp payload.codeVerifiedAt, leave status='pending'
-//                   → row appears in the admin queue with the
-//                   "code-verified" badge, awaiting a human decision.
+//   - grants ownership immediately (auto_verify_ai_call=true, the default)
+//   - leaves the row pending with payload.codeVerifiedAt stamped, so the
+//     admin queue can show "code verified, awaiting manual approval"
 //
 // Auth: any signed-in user. The EF only accepts codes for rows where
-// requester_id === auth.user.id — managers can't redeem codes from
+// requester_id === auth.user.id, so managers can't redeem codes from
 // other operators' requests.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -91,10 +86,7 @@ Deno.serve(async (req) => {
   }
   if (verification.method !== "ai_call") {
     return json(
-      {
-        ok: false,
-        error: "Code verification only applies to ai_call requests",
-      },
+      { ok: false, error: "Code verification only applies to ai_call requests" },
       400,
     );
   }
@@ -110,8 +102,7 @@ Deno.serve(async (req) => {
   }
 
   const storedHash =
-    typeof (verification.payload as Record<string, unknown>).codeHash ===
-    "string"
+    typeof (verification.payload as Record<string, unknown>).codeHash === "string"
       ? ((verification.payload as Record<string, string>).codeHash as string)
       : null;
   if (!storedHash) {
@@ -129,7 +120,6 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Right code → branch on auto_verify_ai_call.
   const { data: settings } = await admin
     .from("app_settings")
     .select("auto_verify_ai_call")
@@ -139,10 +129,8 @@ Deno.serve(async (req) => {
   const now = new Date().toISOString();
 
   if (!autoVerify) {
-    // Manual-review path: stamp codeVerifiedAt on the payload so the
-    // admin queue can show "code verified, awaiting review" without
-    // changing status. Leave the row pending; ownership is granted
-    // (or not) by admin-decide-verification.
+    // Manual-review path: stamp codeVerifiedAt so the admin queue
+    // shows "verified, awaiting approval". Status stays pending.
     const nextPayload = {
       ...(verification.payload as Record<string, unknown>),
       codeVerifiedAt: now,
@@ -164,7 +152,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  // Auto-approve path (default): mark approved + grant ownership.
+  // Auto-approve: mark approved + grant ownership.
   const { error: updateError } = await admin
     .from("venue_verifications")
     .update({
@@ -187,9 +175,9 @@ Deno.serve(async (req) => {
     role: "owner",
   });
   if (memberError) {
-    // Roll the approval back so the operator can retry / a different
-    // path can grant ownership. A unique-violation here means a parallel
-    // claim won (the venue is already owned).
+    // Roll the approval back. A unique-violation here means a parallel
+    // claim won (the venue is already owned); surface it so the
+    // operator can use the contact / report-fraud flow.
     await admin
       .from("venue_verifications")
       .update({

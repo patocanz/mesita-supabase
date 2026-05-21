@@ -323,6 +323,11 @@ Deno.serve(async (req) => {
     closes_at: closesAt,
     hours,
     phone: details.nationalPhoneNumber ?? details.internationalPhoneNumber ?? null,
+    // country is the long-form name Google returns ("Mexico",
+    // "United States", etc.). The lookup EF normalises this into a
+    // region bucket so the manual-fallback card can pick the right
+    // contact channel (WhatsApp for LatAm, SMS for US, email floor).
+    country,
     pitch: synth.pitch ?? details.editorialSummary?.text ?? null,
     story: synth.story ?? details.generativeSummary?.overview?.text ?? null,
     cashback_percent: 10,

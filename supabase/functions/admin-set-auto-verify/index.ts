@@ -3,13 +3,17 @@
 // Toggles one of the per-method auto-confirm flags on
 // public.app_settings:
 //
-//   ai_call → auto_verify_ai_call (default true). When true the OTP
-//             code-entry EF grants ownership on correct code. When
-//             false the row sits in the admin queue tagged
-//             "code-verified, awaiting manual approval".
-//   video   → auto_verify_video   (default false). When true a
-//             submitted video URL grants ownership immediately. When
-//             false the row goes to the admin queue for human review.
+//   ai_call  → auto_verify_ai_call  (default true). When true the OTP
+//              code-entry EF grants ownership on correct code. When
+//              false the row sits in the admin queue tagged
+//              "code-verified, awaiting manual approval".
+//   ai_email → auto_verify_ai_email (default true). Same semantics as
+//              ai_call but for the on-domain email OTP path.
+//   video    → auto_verify_video    (default false). Legacy. When true
+//              a submitted video URL grants ownership immediately;
+//              false routes to the admin queue. The new /add UI no
+//              longer offers video, but the flag stays for any
+//              historical rows the admin queue still surfaces.
 //
 // Auth: caller's JWT email must be in public.super_admins.
 
@@ -17,11 +21,15 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 
-type Method = "ai_call" | "video";
+type Method = "ai_call" | "ai_email" | "video";
 type Body = { method?: Method; enabled?: boolean };
 
-const COLUMN: Record<Method, "auto_verify_ai_call" | "auto_verify_video"> = {
+const COLUMN: Record<
+  Method,
+  "auto_verify_ai_call" | "auto_verify_ai_email" | "auto_verify_video"
+> = {
   ai_call: "auto_verify_ai_call",
+  ai_email: "auto_verify_ai_email",
   video: "auto_verify_video",
 };
 
@@ -74,8 +82,15 @@ Deno.serve(async (req) => {
   } catch {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
-  if (body.method !== "ai_call" && body.method !== "video") {
-    return json({ ok: false, error: "method must be ai_call | video" }, 400);
+  if (
+    body.method !== "ai_call" &&
+    body.method !== "ai_email" &&
+    body.method !== "video"
+  ) {
+    return json(
+      { ok: false, error: "method must be ai_call | ai_email | video" },
+      400,
+    );
   }
   if (typeof body.enabled !== "boolean") {
     return json({ ok: false, error: "enabled must be a boolean" }, 400);
@@ -86,7 +101,9 @@ Deno.serve(async (req) => {
     .from("app_settings")
     .update({ [column]: body.enabled, updated_by: userId })
     .eq("id", 1)
-    .select("auto_verify_ai_call, auto_verify_video, updated_at")
+    .select(
+      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, updated_at",
+    )
     .single();
   if (error) {
     return json(
@@ -98,6 +115,7 @@ Deno.serve(async (req) => {
   return json({
     ok: true,
     autoVerifyAiCall: data.auto_verify_ai_call,
+    autoVerifyAiEmail: data.auto_verify_ai_email,
     autoVerifyVideo: data.auto_verify_video,
     autoVerifyUpdatedAt: data.updated_at,
   });
