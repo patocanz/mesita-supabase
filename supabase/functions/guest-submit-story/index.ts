@@ -20,13 +20,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
-
-const STORY_KINDS = new Set([
-  "s_p_sf_c",
-  "r_s_p_sf_c",
-  "s_dp_sf",
-  "r_s_dp_sf",
-]);
+import { STORY_KINDS } from "../_shared/ticket-kinds.ts";
 
 type Body = { ticketId?: string; screenshotUrl?: string };
 
