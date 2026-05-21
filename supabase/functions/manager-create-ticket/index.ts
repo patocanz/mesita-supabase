@@ -25,6 +25,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { FORMAL_KINDS, STORY_KINDS } from "../_shared/ticket-kinds.ts";
 
 // All 10 kinds. The two `none` rows in the taxonomy mean "no Mesita
 // transaction" — there's no ticket to write. We reject 'none' here so the
@@ -40,8 +41,6 @@ const ACTIONABLE_KINDS = new Set([
   "r_s_dp_sf",
 ]);
 
-const FORMAL_KINDS = new Set(["p_c", "s_p_sf_c", "r_p_c", "r_s_p_sf_c"]);
-const STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c", "s_dp_sf", "r_s_dp_sf"]);
 const RESERVATION_KINDS = new Set([
   "r_p_c",
   "r_s_p_sf_c",
