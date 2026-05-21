@@ -8,13 +8,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+import { corsPreflight, json } from "../_shared/http.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -22,17 +16,15 @@ const MAX_LIMIT = 200;
 type ListBody = { limit?: number };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: CORS_HEADERS });
-  }
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "GET" && req.method !== "POST") {
-    return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
+    return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
   if (!supabaseUrl || !anonKey) {
-    return jsonResponse({ ok: false, error: "Server misconfigured" }, 500);
+    return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
   // Anon client is sufficient: the venues RLS policy already restricts SELECT
@@ -66,19 +58,12 @@ Deno.serve(async (req) => {
     .limit(limit);
 
   if (error) {
-    return jsonResponse({ ok: false, error: error.message }, 500);
+    return json({ ok: false, error: error.message }, 500);
   }
 
-  return jsonResponse({ ok: true, venues: data ?? [] });
+  return json({ ok: true, venues: data ?? [] });
 });
 
 function clampLimit(n: number): number {
   return Math.max(1, Math.min(MAX_LIMIT, Math.trunc(n)));
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-  });
 }
