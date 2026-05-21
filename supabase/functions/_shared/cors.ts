@@ -11,7 +11,10 @@
 
 export const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  // GET is advertised for the handful of read EFs that accept both —
+  // adding it to the canonical header doesn't enable GET on POST-only
+  // handlers because each EF still gates the method server-side.
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 } as const;
