@@ -175,6 +175,29 @@ Deno.serve(async (req) => {
       byPlaceId.set(p.placeId, p);
     }
   }
+
+  // Backfill status for predictions Google returned but the ILIKE
+  // fallback missed. The ILIKE matches against the raw input, so a query
+  // like "Strana San Pedro" doesn't catch a venue named just "Strana"
+  // even though Google's placeId is in our DB. This second pass keys
+  // off Google's placeId directly and overwrites status accordingly.
+  const orphanPlaceIds = Array.from(byPlaceId.values())
+    .filter((p) => p.status === "not_in_mesita")
+    .map((p) => p.placeId);
+  if (orphanPlaceIds.length > 0 && SUPABASE_URL && SERVICE_KEY) {
+    const statusByPlaceId = await enrichByPlaceIds(
+      SUPABASE_URL,
+      SERVICE_KEY,
+      orphanPlaceIds,
+      userId,
+    );
+    for (const [placeId, status] of statusByPlaceId) {
+      const existing = byPlaceId.get(placeId);
+      if (!existing) continue;
+      byPlaceId.set(placeId, { ...existing, status, inMesita: true });
+    }
+  }
+
   // Already-in-Mesita predictions surface first so the operator sees
   // the existing profile before the long tail of Google matches.
   const predictions = Array.from(byPlaceId.values()).sort((a, b) => {
@@ -329,6 +352,68 @@ function escapeIlike(s: string): string {
   // % and _ are wildcards in ILIKE — escape so user input doesn't
   // accidentally match everything.
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+// Looks up the given Google place_ids in Mesita's venues + venue_members
+// and returns the per-placeId PredictionStatus. Empty input → empty map.
+// Caller's id (if present) decides verified_partner_self vs _other.
+async function enrichByPlaceIds(
+  supabaseUrl: string,
+  serviceKey: string,
+  placeIds: string[],
+  callerId: string | null,
+): Promise<Map<string, PredictionStatus>> {
+  const admin = createClient(supabaseUrl, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data: venues, error: venuesError } = await admin
+    .from("venues")
+    .select("id, google_place_id")
+    .in("google_place_id", placeIds);
+  if (venuesError) {
+    console.error(
+      "[manager-suggest-places] placeId enrichment:",
+      venuesError.message,
+    );
+    return new Map();
+  }
+  type VenueRow = { id: string; google_place_id: string };
+  const rows = (venues ?? []) as VenueRow[];
+  if (rows.length === 0) return new Map();
+
+  const { data: ownerRows, error: ownersError } = await admin
+    .from("venue_members")
+    .select("venue_id, manager_id")
+    .in(
+      "venue_id",
+      rows.map((v) => v.id),
+    )
+    .eq("role", "owner");
+  if (ownersError) {
+    console.error(
+      "[manager-suggest-places] placeId owner lookup:",
+      ownersError.message,
+    );
+  }
+  const ownerByVenue = new Map<string, string>();
+  for (const m of (ownerRows ?? []) as Array<{
+    venue_id: string;
+    manager_id: string;
+  }>) {
+    ownerByVenue.set(m.venue_id, m.manager_id);
+  }
+
+  const out = new Map<string, PredictionStatus>();
+  for (const v of rows) {
+    const ownerId = ownerByVenue.get(v.id);
+    const status: PredictionStatus = ownerId
+      ? callerId && ownerId === callerId
+        ? "verified_partner_self"
+        : "verified_partner_other"
+      : "web_listed";
+    out.set(v.google_place_id, status);
+  }
+  return out;
 }
 
 // ── Google error classification ───────────────────────────────────────
