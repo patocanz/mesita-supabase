@@ -12,6 +12,7 @@
 // Deploy: supabase functions deploy manager-get-place
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { corsPreflight, json } from "../_shared/http.ts";
 
 const DETAILS_BASE = "https://places.googleapis.com/v1/places";
 
@@ -32,13 +33,6 @@ const FIELD_MASK = [
   "priceLevel",
   "googleMapsUri",
 ].join(",");
-
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
 
 type AddressComponent = { longText?: string; shortText?: string; types?: string[] };
 type GoogleDetails = {
@@ -68,16 +62,14 @@ type Body = { placeId?: string; sessionToken?: string };
 // the client.
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: CORS_HEADERS });
-  }
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
-    return jsonResponse({ ok: false, error: "Method not allowed" });
+    return json({ ok: false, error: "Method not allowed" });
   }
 
   const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
   if (!apiKey) {
-    return jsonResponse({
+    return json({
       ok: false,
       code: "server_missing_key",
       error:
@@ -89,16 +81,16 @@ Deno.serve(async (req) => {
   try {
     body = (await req.json()) as Body;
   } catch {
-    return jsonResponse({ ok: false, error: "Invalid JSON" });
+    return json({ ok: false, error: "Invalid JSON" });
   }
 
   const placeId = (body.placeId ?? "").toString();
   const sessionToken = (body.sessionToken ?? "").toString();
   if (!placeId) {
-    return jsonResponse({ ok: false, error: "Missing placeId" });
+    return json({ ok: false, error: "Missing placeId" });
   }
   if (!sessionToken) {
-    return jsonResponse({ ok: false, error: "Missing sessionToken" });
+    return json({ ok: false, error: "Missing sessionToken" });
   }
 
   try {
@@ -115,7 +107,7 @@ Deno.serve(async (req) => {
     if (!r.ok) {
       const text = await r.text();
       const code = classifyGoogleError(r.status, text);
-      return jsonResponse({
+      return json({
         ok: false,
         code,
         error: friendlyGoogleError(code, r.status, text),
@@ -124,14 +116,14 @@ Deno.serve(async (req) => {
     }
 
     const data = (await r.json()) as GoogleDetails;
-    return jsonResponse({
+    return json({
       ok: true,
       details: normalise(placeId, data),
       mock: false,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    return jsonResponse({
+    return json({
       ok: false,
       code: "network_error",
       error: `Couldn't reach Google: ${message}`,
@@ -219,10 +211,3 @@ function priceLevelFromString(p: string | undefined): 1 | 2 | 3 | 4 | null {
   }
 }
 
-function jsonResponse(body: unknown): Response {
-  // Always 200 on the wire — see top-of-file comment.
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-  });
-}

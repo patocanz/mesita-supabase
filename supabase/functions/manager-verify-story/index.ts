@@ -32,16 +32,11 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
-
-const FORMAL_STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
-const INFORMAL_STORY_KINDS = new Set(["s_dp_sf", "r_s_dp_sf"]);
+import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  FORMAL_STORY_KINDS,
+  INFORMAL_STORY_KINDS,
+} from "../_shared/ticket-kinds.ts";
 
 type Body = {
   ticketId?: string;
@@ -50,7 +45,7 @@ type Body = {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
@@ -308,10 +303,3 @@ Deno.serve(async (req) => {
     guestBalanceAfterCents: balance,
   });
 });
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...CORS, "Content-Type": "application/json" },
-  });
-}
