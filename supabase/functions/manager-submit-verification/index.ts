@@ -26,7 +26,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 
-type Method = "ai_call" | "video" | "postcard";
+const VERIFICATION_METHODS = ["ai_call", "video", "postcard"] as const;
+type Method = (typeof VERIFICATION_METHODS)[number];
 
 type Body = {
   venueId?: string;
@@ -71,7 +72,7 @@ Deno.serve(async (req) => {
   const method = body.method;
   const requesterEmail = (body.requesterEmail ?? "").trim().toLowerCase();
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  if (!method || !["ai_call", "video", "postcard"].includes(method)) {
+  if (!method || !VERIFICATION_METHODS.includes(method)) {
     return json(
       { ok: false, error: "method must be ai_call | video | postcard" },
       400,
