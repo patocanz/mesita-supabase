@@ -181,7 +181,13 @@ Deno.serve(async (req) => {
   // ── Step 1: Google Places details (blocking — everything else needs it) ──
   const details = await fetchGoogleDetails(placeId, GOOGLE_KEY);
   if ("error" in details) {
-    return json({ ok: false, error: `google_details: ${details.error}` }, 502);
+    // Surface transient Google outages as 503 so the operator UI can
+    // distinguish them from a genuine bad-request (502). Body carries
+    // the pre-classified friendly message; no raw JSON is bubbled up.
+    return json(
+      { ok: false, code: details.transient ? "google_unavailable" : "google_error", error: details.error },
+      details.transient ? 503 : 502,
+    );
   }
 
   const venueName = details.displayName?.text ?? "";
@@ -415,17 +421,41 @@ Deno.serve(async (req) => {
 // Google Places
 // ───────────────────────────────────────────────────────────────────────────
 
+// Google Places (New) occasionally returns 5xx during regional hiccups.
+// One retry with a short wait covers the typical transient case without
+// adding meaningful latency on the happy path. The returned `error`
+// shape is friendly (already classified) so the caller can surface it
+// directly to the operator.
 async function fetchGoogleDetails(
   placeId: string,
   apiKey: string,
-): Promise<GoogleDetails | { error: string }> {
+): Promise<GoogleDetails | { error: string; transient: boolean }> {
   const url = `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?languageCode=es-MX&regionCode=MX`;
-  const r = await fetch(url, {
-    headers: { "X-Goog-Api-Key": apiKey, "X-Goog-FieldMask": GOOGLE_FIELD_MASK },
-  });
+  const doFetch = () =>
+    fetch(url, {
+      headers: {
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": GOOGLE_FIELD_MASK,
+      },
+    });
+
+  let r = await doFetch();
+  if (r.status >= 500 && r.status < 600) {
+    await new Promise((res) => setTimeout(res, 800));
+    r = await doFetch();
+  }
+
   if (!r.ok) {
     const text = await r.text();
-    return { error: `${r.status}: ${text.slice(0, 240)}` };
+    const transient = r.status >= 500 && r.status < 600;
+    const friendly = transient
+      ? "Google Places is temporarily unavailable. Try again in a few seconds."
+      : r.status === 429
+        ? "Google Places rate-limited the request. Try again in a moment."
+        : r.status === 404
+          ? "Google couldn't find that place. Try searching again."
+          : `Google rejected the request (${r.status}). ${text.slice(0, 160)}`;
+    return { error: friendly, transient };
   }
   return (await r.json()) as GoogleDetails;
 }
