@@ -26,6 +26,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { corsPreflight, json } from "../_shared/http.ts";
 
 const AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
 
@@ -46,13 +47,6 @@ const MESITA_PRIMARY_TYPES = [
   "night_club",
   "bakery",
 ];
-
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
 
 type Body = { input?: string; sessionToken?: string };
 
@@ -76,16 +70,14 @@ type Prediction = {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: CORS_HEADERS });
-  }
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
-    return jsonResponse({ ok: false, error: "Method not allowed" });
+    return json({ ok: false, error: "Method not allowed" });
   }
 
   const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
   if (!apiKey) {
-    return jsonResponse({
+    return json({
       ok: false,
       code: "server_missing_key",
       error:
@@ -97,17 +89,17 @@ Deno.serve(async (req) => {
   try {
     body = (await req.json()) as Body;
   } catch {
-    return jsonResponse({ ok: false, error: "Invalid JSON" });
+    return json({ ok: false, error: "Invalid JSON" });
   }
 
   const input = (body.input ?? "").toString().trim();
   const sessionToken = (body.sessionToken ?? "").toString();
 
   if (input.length < 2) {
-    return jsonResponse({ ok: true, predictions: [], mock: false });
+    return json({ ok: true, predictions: [], mock: false });
   }
   if (!sessionToken) {
-    return jsonResponse({ ok: false, error: "Missing sessionToken" });
+    return json({ ok: false, error: "Missing sessionToken" });
   }
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -142,7 +134,7 @@ Deno.serve(async (req) => {
   ]);
 
   if (googleResult.status === "rejected" && mesitaResult.status === "rejected") {
-    return jsonResponse({
+    return json({
       ok: false,
       code: "network_error",
       error:
@@ -155,7 +147,7 @@ Deno.serve(async (req) => {
   // surface that — Mesita fallback alone isn't enough for the operator
   // to know their search worked.
   if (googleResult.status === "fulfilled" && googleResult.value.errorEnvelope) {
-    return jsonResponse(googleResult.value.errorEnvelope);
+    return json(googleResult.value.errorEnvelope);
   }
 
   const googlePreds =
@@ -190,7 +182,7 @@ Deno.serve(async (req) => {
     return a.inMesita ? -1 : 1;
   });
 
-  return jsonResponse({ ok: true, predictions, mock: false });
+  return json({ ok: true, predictions, mock: false });
 });
 
 // ── Google ────────────────────────────────────────────────────────────
@@ -373,11 +365,4 @@ function friendlyGoogleError(code: string, status: number, body: string): string
     default:
       return `Google ${status}: ${body.slice(0, 200)}`;
   }
-}
-
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-  });
 }
