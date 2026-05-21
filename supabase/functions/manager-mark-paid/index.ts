@@ -28,13 +28,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+import { corsPreflight, json } from "../_shared/http.ts";
 
 const FORMAL_KINDS = new Set(["p_c", "s_p_sf_c", "r_p_c", "r_s_p_sf_c"]);
 const STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
@@ -43,7 +37,7 @@ const STORY_VERIFIED = new Set(["ai_verified", "waiter_verified"]);
 type Body = { ticketId?: string };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
@@ -269,10 +263,3 @@ Deno.serve(async (req) => {
     awaitingStory: false,
   });
 });
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...CORS, "Content-Type": "application/json" },
-  });
-}
