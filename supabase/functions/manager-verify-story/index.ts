@@ -33,9 +33,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
-
-const FORMAL_STORY_KINDS = new Set(["s_p_sf_c", "r_s_p_sf_c"]);
-const INFORMAL_STORY_KINDS = new Set(["s_dp_sf", "r_s_dp_sf"]);
+import {
+  FORMAL_STORY_KINDS,
+  INFORMAL_STORY_KINDS,
+} from "../_shared/ticket-kinds.ts";
 
 type Body = {
   ticketId?: string;
