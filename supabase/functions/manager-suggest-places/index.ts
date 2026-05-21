@@ -14,7 +14,10 @@
 // Also runs a Mesita-side name ILIKE search in parallel so already-
 // onboarded venues surface even when Google autocomplete misses (Google
 // is picky about city qualifiers, accents, etc.). Each prediction
-// carries `inMesita: boolean` so the UI can badge it.
+// carries a `status` so the UI can render the right per-row badge
+// (not_in_mesita / web_listed / verified_partner_other /
+// verified_partner_self). `inMesita` is kept for backwards-compat with
+// the old frontend; new code should branch on `status`.
 //
 // IMPORTANT: this function always returns HTTP 200, even on Google
 // failures. supabase-js's `functions.invoke` swallows the response body
@@ -53,10 +56,22 @@ const CORS_HEADERS = {
 
 type Body = { input?: string; sessionToken?: string };
 
+// Mirrors the lookup EF's coarse states, plus a self/other split for the
+// owned case so the picker can say "you own this" without a second
+// round-trip.
+type PredictionStatus =
+  | "not_in_mesita"
+  | "web_listed"
+  | "verified_partner_other"
+  | "verified_partner_self";
+
 type Prediction = {
   placeId: string;
   mainText: string;
   secondaryText: string;
+  status: PredictionStatus;
+  // Legacy boolean kept so an older frontend that pre-dates `status`
+  // still gets a usable signal. Always equals (status !== "not_in_mesita").
   inMesita: boolean;
 };
 
@@ -96,14 +111,33 @@ Deno.serve(async (req) => {
   }
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
   const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  // We need the caller's id to flag verified_partner_self vs _other on
+  // the Mesita-side matches. An unauthenticated call still gets useful
+  // predictions — ownership flagging just degrades to "_other" because
+  // there's no caller to compare against.
+  let userId: string | null = null;
+  const authHeader = req.headers.get("Authorization") ?? "";
+  if (SUPABASE_URL && ANON_KEY && authHeader.startsWith("Bearer ")) {
+    try {
+      const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+        global: { headers: { Authorization: authHeader } },
+      });
+      const { data } = await userClient.auth.getUser();
+      userId = data.user?.id ?? null;
+    } catch (err) {
+      console.error("[manager-suggest-places] auth.getUser:", err);
+    }
+  }
 
   // Fire Google + Mesita searches in parallel. Either can fail
   // independently; we merge whatever comes back.
   const [googleResult, mesitaResult] = await Promise.allSettled([
     fetchGooglePredictions(input, sessionToken, apiKey),
     SUPABASE_URL && SERVICE_KEY
-      ? fetchMesitaPredictions(SUPABASE_URL, SERVICE_KEY, input)
+      ? fetchMesitaPredictions(SUPABASE_URL, SERVICE_KEY, input, userId)
       : Promise.resolve([] as Prediction[]),
   ]);
 
@@ -129,17 +163,22 @@ Deno.serve(async (req) => {
   const mesitaPreds =
     mesitaResult.status === "fulfilled" ? mesitaResult.value : [];
 
-  // Merge: Mesita-side hits take precedence (their inMesita=true wins
-  // over a Google entry with the same placeId), then any remaining
-  // Google entries follow. Stable order.
+  // Merge: Mesita-side hits take precedence (their status wins over a
+  // Google entry with the same placeId), then any remaining Google
+  // entries follow. Stable order.
   const byPlaceId = new Map<string, Prediction>();
   for (const p of mesitaPreds) byPlaceId.set(p.placeId, p);
   for (const p of googlePreds) {
     const existing = byPlaceId.get(p.placeId);
     if (existing) {
       // Google's structured format is usually nicer text; keep Mesita's
-      // inMesita flag and prefer Google's text when both exist.
-      byPlaceId.set(p.placeId, { ...p, inMesita: existing.inMesita });
+      // status (and the derived inMesita flag) when both sources agree
+      // on the placeId, and prefer Google's mainText/secondaryText.
+      byPlaceId.set(p.placeId, {
+        ...p,
+        status: existing.status,
+        inMesita: existing.inMesita,
+      });
     } else {
       byPlaceId.set(p.placeId, p);
     }
@@ -211,6 +250,7 @@ async function fetchGooglePredictions(
       placeId: p.placeId,
       mainText: p.structuredFormat?.mainText?.text ?? p.text?.text ?? "",
       secondaryText: p.structuredFormat?.secondaryText?.text ?? "",
+      status: "not_in_mesita",
       inMesita: false,
     }))
     .filter((p) => p.placeId && p.mainText);
@@ -223,6 +263,7 @@ async function fetchMesitaPredictions(
   supabaseUrl: string,
   serviceKey: string,
   input: string,
+  callerId: string | null,
 ): Promise<Prediction[]> {
   const admin = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
@@ -232,7 +273,7 @@ async function fetchMesitaPredictions(
   // this is a fallback for the long-tail case where Google misses.
   const { data, error } = await admin
     .from("venues")
-    .select("google_place_id, name, address")
+    .select("id, google_place_id, name, address")
     .ilike("name", `%${escapeIlike(input)}%`)
     .not("google_place_id", "is", null)
     .limit(8);
@@ -240,13 +281,56 @@ async function fetchMesitaPredictions(
     console.error("[manager-suggest-places] mesita search:", error.message);
     return [];
   }
-  type Row = { google_place_id: string; name: string; address: string | null };
-  return ((data ?? []) as Row[]).map<Prediction>((v) => ({
-    placeId: v.google_place_id,
-    mainText: v.name,
-    secondaryText: v.address ?? "Already on Mesita",
-    inMesita: true,
-  }));
+  type Row = {
+    id: string;
+    google_place_id: string;
+    name: string;
+    address: string | null;
+  };
+  const rows = (data ?? []) as Row[];
+  if (rows.length === 0) return [];
+
+  // Owner lookup for the match set. One query, joined on the client by
+  // venue_id → manager_id. Multiple-owner rows shouldn't happen in
+  // practice (the schema treats `owner` as exclusive) but if they do,
+  // last-write-wins is fine for badge purposes.
+  const { data: ownerRows, error: ownersError } = await admin
+    .from("venue_members")
+    .select("venue_id, manager_id")
+    .in(
+      "venue_id",
+      rows.map((r) => r.id),
+    )
+    .eq("role", "owner");
+  if (ownersError) {
+    console.error(
+      "[manager-suggest-places] owner lookup:",
+      ownersError.message,
+    );
+  }
+  const ownerByVenue = new Map<string, string>();
+  for (const m of (ownerRows ?? []) as Array<{
+    venue_id: string;
+    manager_id: string;
+  }>) {
+    ownerByVenue.set(m.venue_id, m.manager_id);
+  }
+
+  return rows.map<Prediction>((v) => {
+    const ownerId = ownerByVenue.get(v.id);
+    const status: PredictionStatus = ownerId
+      ? callerId && ownerId === callerId
+        ? "verified_partner_self"
+        : "verified_partner_other"
+      : "web_listed";
+    return {
+      placeId: v.google_place_id,
+      mainText: v.name,
+      secondaryText: v.address ?? "Already on Mesita",
+      status,
+      inMesita: true,
+    };
+  });
 }
 
 function escapeIlike(s: string): string {
