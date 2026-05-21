@@ -24,13 +24,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-};
+import { corsPreflight, json } from "../_shared/http.ts";
 
 // All 10 kinds. The two `none` rows in the taxonomy mean "no Mesita
 // transaction" — there's no ticket to write. We reject 'none' here so the
@@ -70,7 +64,7 @@ type Body = {
 };
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+  if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
@@ -476,11 +470,4 @@ function toCents(v: unknown): number | null {
   if (!Number.isFinite(n)) return null;
   if (n < 0) return null;
   return Math.trunc(n);
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...CORS, "Content-Type": "application/json" },
-  });
 }
