@@ -305,47 +305,14 @@ async function fetchMesitaPredictions(
   const rows = (data ?? []) as Row[];
   if (rows.length === 0) return [];
 
-  // Owner lookup for the match set. One query, joined on the client by
-  // venue_id → manager_id. Multiple-owner rows shouldn't happen in
-  // practice (the schema treats `owner` as exclusive) but if they do,
-  // last-write-wins is fine for badge purposes.
-  const { data: ownerRows, error: ownersError } = await admin
-    .from("venue_members")
-    .select("venue_id, manager_id")
-    .in(
-      "venue_id",
-      rows.map((r) => r.id),
-    )
-    .eq("role", "owner");
-  if (ownersError) {
-    console.error(
-      "[manager-suggest-places] owner lookup:",
-      ownersError.message,
-    );
-  }
-  const ownerByVenue = new Map<string, string>();
-  for (const m of (ownerRows ?? []) as Array<{
-    venue_id: string;
-    manager_id: string;
-  }>) {
-    ownerByVenue.set(m.venue_id, m.manager_id);
-  }
-
-  return rows.map<Prediction>((v) => {
-    const ownerId = ownerByVenue.get(v.id);
-    const status: PredictionStatus = ownerId
-      ? callerId && ownerId === callerId
-        ? "verified_partner_self"
-        : "verified_partner_other"
-      : "web_listed";
-    return {
-      placeId: v.google_place_id,
-      mainText: v.name,
-      secondaryText: v.address ?? "Already on Mesita",
-      status,
-      inMesita: true,
-    };
-  });
+  const statuses = await statusesForVenues(admin, rows, callerId);
+  return rows.map<Prediction>((v) => ({
+    placeId: v.google_place_id,
+    mainText: v.name,
+    secondaryText: v.address ?? "Already on Mesita",
+    status: statuses.get(v.google_place_id) ?? "web_listed",
+    inMesita: true,
+  }));
 }
 
 function escapeIlike(s: string): string {
@@ -354,9 +321,9 @@ function escapeIlike(s: string): string {
   return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
 
-// Looks up the given Google place_ids in Mesita's venues + venue_members
-// and returns the per-placeId PredictionStatus. Empty input → empty map.
-// Caller's id (if present) decides verified_partner_self vs _other.
+// Resolves a placeId list against Mesita venues + venue_members. Used
+// to backfill status for Google-sourced predictions the ILIKE fallback
+// missed because the input string didn't match the venue name.
 async function enrichByPlaceIds(
   supabaseUrl: string,
   serviceKey: string,
@@ -366,52 +333,61 @@ async function enrichByPlaceIds(
   const admin = createClient(supabaseUrl, serviceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  const { data: venues, error: venuesError } = await admin
+  const { data, error } = await admin
     .from("venues")
     .select("id, google_place_id")
     .in("google_place_id", placeIds);
-  if (venuesError) {
+  if (error) {
     console.error(
       "[manager-suggest-places] placeId enrichment:",
-      venuesError.message,
+      error.message,
     );
     return new Map();
   }
-  type VenueRow = { id: string; google_place_id: string };
-  const rows = (venues ?? []) as VenueRow[];
-  if (rows.length === 0) return new Map();
+  type Row = { id: string; google_place_id: string };
+  return statusesForVenues(admin, (data ?? []) as Row[], callerId);
+}
 
-  const { data: ownerRows, error: ownersError } = await admin
+// One owner-lookup pass over a venue-row set, returning the per-placeId
+// PredictionStatus. Both the ILIKE search and the placeId backfill route
+// through this so the status math + the venue_members query live in one
+// place. `web_listed` for unowned rows, `verified_partner_self/_other`
+// for owned ones depending on whether the caller is the owner.
+async function statusesForVenues(
+  admin: ReturnType<typeof createClient>,
+  rows: Array<{ id: string; google_place_id: string }>,
+  callerId: string | null,
+): Promise<Map<string, PredictionStatus>> {
+  if (rows.length === 0) return new Map();
+  const { data, error } = await admin
     .from("venue_members")
     .select("venue_id, manager_id")
     .in(
       "venue_id",
-      rows.map((v) => v.id),
+      rows.map((r) => r.id),
     )
     .eq("role", "owner");
-  if (ownersError) {
-    console.error(
-      "[manager-suggest-places] placeId owner lookup:",
-      ownersError.message,
-    );
+  if (error) {
+    console.error("[manager-suggest-places] owner lookup:", error.message);
   }
   const ownerByVenue = new Map<string, string>();
-  for (const m of (ownerRows ?? []) as Array<{
+  for (const m of (data ?? []) as Array<{
     venue_id: string;
     manager_id: string;
   }>) {
     ownerByVenue.set(m.venue_id, m.manager_id);
   }
-
   const out = new Map<string, PredictionStatus>();
   for (const v of rows) {
     const ownerId = ownerByVenue.get(v.id);
-    const status: PredictionStatus = ownerId
-      ? callerId && ownerId === callerId
-        ? "verified_partner_self"
-        : "verified_partner_other"
-      : "web_listed";
-    out.set(v.google_place_id, status);
+    out.set(
+      v.google_place_id,
+      ownerId
+        ? callerId && ownerId === callerId
+          ? "verified_partner_self"
+          : "verified_partner_other"
+        : "web_listed",
+    );
   }
   return out;
 }

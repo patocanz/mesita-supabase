@@ -17,16 +17,17 @@
 //                              must use the contact / report-fraud flow.
 //
 // Every claim-able state (web_listed_unclaimed, pending_by_me,
-// pending_by_other) also carries a `methods` block describing which
-// verification paths the UI should surface:
+// pending_by_other) carries a `methods` block describing which auto-
+// verify paths the UI should surface:
 //
 //   methods.phone   — available when venues.phone is non-null.
 //   methods.email   — available when venues.email is on-domain (its
 //                     host matches the website_url host, ±www. and
 //                     subdomain).
-//   methods.manual  — always available. Region-bucketed contact details
-//                     so the UI can pick WhatsApp (LatAm), SMS (US), or
-//                     email-only based on the venue's country.
+//
+// The third "Talk to us" option (WhatsApp deep-link) is always shown
+// by the UI and doesn't need a server hint — it's a static fallback
+// channel handled entirely on the FE.
 //
 // Auth: any signed-in user.
 
@@ -37,62 +38,19 @@ import { corsPreflight, json } from "../_shared/http.ts";
 type Body = { placeId?: string };
 
 const VENUE_COLUMNS =
-  "id, slug, name, status, listing_type, address, phone, email, website_url, country, photos, category, vibe, cashback_percent, created_at, updated_at";
-
-type Region = "mx_latam" | "us" | "other";
-
-const LATAM_COUNTRIES = new Set([
-  "mexico",
-  "argentina",
-  "colombia",
-  "chile",
-  "peru",
-  "uruguay",
-  "brazil",
-  "ecuador",
-  "bolivia",
-  "paraguay",
-  "venezuela",
-  "guatemala",
-  "costa rica",
-  "panama",
-  "dominican republic",
-  "el salvador",
-  "honduras",
-  "nicaragua",
-  "puerto rico",
-]);
-
-const OPS_EMAIL = "hello@mesita.ai";
+  "id, slug, name, status, listing_type, address, phone, email, website_url, photos, category, vibe, cashback_percent, created_at, updated_at";
 
 type VenueRow = {
   id: string;
   phone: string | null;
   email: string | null;
   website_url: string | null;
-  country: string | null;
 };
 
 type MethodsBlock = {
   phone: { available: boolean; displayPhone: string | null };
   email: { available: boolean; displayEmail: string | null };
-  manual: {
-    region: Region;
-    whatsapp: string | null;
-    sms: string | null;
-    email: string;
-  };
 };
-
-function regionForCountry(country: string | null): Region {
-  if (!country) return "other";
-  const c = country.toLowerCase();
-  if (c === "united states" || c === "us" || c === "canada" || c === "ca") {
-    return "us";
-  }
-  if (LATAM_COUNTRIES.has(c)) return "mx_latam";
-  return "other";
-}
 
 // True when the email's domain matches the website's hostname, ignoring
 // "www." on either side. Subdomain matches count in both directions so
@@ -116,10 +74,9 @@ function isOnDomain(email: string, websiteUrl: string): boolean {
 function methodsFor(venue: VenueRow): MethodsBlock {
   const phoneOk = !!venue.phone;
   const emailOk =
-    !!venue.email && !!venue.website_url && isOnDomain(venue.email, venue.website_url);
-  const region = regionForCountry(venue.country);
-  const whatsapp = (Deno.env.get("MESITA_OPS_WHATSAPP") ?? "").trim() || null;
-  const sms = (Deno.env.get("MESITA_OPS_SMS") ?? "").trim() || null;
+    !!venue.email &&
+    !!venue.website_url &&
+    isOnDomain(venue.email, venue.website_url);
   return {
     phone: {
       available: phoneOk,
@@ -128,12 +85,6 @@ function methodsFor(venue: VenueRow): MethodsBlock {
     email: {
       available: emailOk,
       displayEmail: emailOk ? venue.email : null,
-    },
-    manual: {
-      region,
-      whatsapp: region === "mx_latam" ? whatsapp : null,
-      sms: region === "us" ? sms : null,
-      email: OPS_EMAIL,
     },
   };
 }
