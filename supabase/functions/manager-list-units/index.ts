@@ -10,6 +10,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { VENUE_MANAGER_COLUMNS } from "../_shared/venue-columns.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -47,9 +48,7 @@ Deno.serve(async (req) => {
 
   const { data, error } = await admin
     .from("venue_members")
-    .select(
-      "role, venue:venues(id, slug, name, category, vibe, price_level, listing_type, status, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, created_at, updated_at)",
-    )
+    .select(`role, venue:venues(${VENUE_MANAGER_COLUMNS})`)
     .eq("manager_id", userId)
     .order("created_at", { ascending: false });
 
