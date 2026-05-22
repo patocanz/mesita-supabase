@@ -34,6 +34,7 @@ type UpdateBody = {
     | "informal_ultra";
   address?: string | null;
   closes_at?: string | null;
+  hours?: VenueHours | null;
   phone?: string | null;
   pitch?: string | null;
   story?: string | null;
@@ -65,6 +66,28 @@ type UpdateBody = {
   whatsapp_pr_urls?: string[];
   instagram_pr_urls?: string[];
 };
+
+type HoursRange = { open: string; close: string };
+type DayKey =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+type VenueHours = Partial<Record<DayKey, HoursRange[]>>;
+
+const DAY_KEYS: DayKey[] = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+];
+const HHMM_RE = /^([01]?\d|2[0-3]):[0-5]\d$/;
 
 const URL_FIELDS = [
   "website_url",
@@ -256,6 +279,16 @@ Deno.serve(async (req) => {
     }
     update.closes_at = raw;
   }
+  if ("hours" in body) {
+    const cleaned = sanitiseHours(body.hours);
+    if (cleaned === "invalid") {
+      return json(
+        { ok: false, error: "hours must be a map of weekday → [{open,close}] with HH:MM values" },
+        400,
+      );
+    }
+    update.hours = cleaned;
+  }
   if ("phone" in body) update.phone = optString(body.phone, 40);
   if ("pitch" in body) update.pitch = optString(body.pitch, 200);
   if ("story" in body) update.story = optString(body.story, 1500);
@@ -381,6 +414,33 @@ function clampInt(n: unknown, lo: number, hi: number): number | null {
   const v = Number(n);
   if (!Number.isFinite(v)) return null;
   return Math.max(lo, Math.min(hi, Math.trunc(v)));
+}
+
+// "invalid" is the only failure sentinel so the caller can return a single
+// 400. Null means the manager intentionally cleared their hours. Empty object
+// is permitted — the venue is open zero days.
+function sanitiseHours(v: unknown): VenueHours | null | "invalid" {
+  if (v == null) return null;
+  if (typeof v !== "object" || Array.isArray(v)) return "invalid";
+  const input = v as Record<string, unknown>;
+  const out: VenueHours = {};
+  for (const day of DAY_KEYS) {
+    if (!(day in input)) continue;
+    const ranges = input[day];
+    if (ranges == null) continue;
+    if (!Array.isArray(ranges)) return "invalid";
+    const cleanRanges: HoursRange[] = [];
+    for (const r of ranges) {
+      if (!r || typeof r !== "object") return "invalid";
+      const open = (r as { open?: unknown }).open;
+      const close = (r as { close?: unknown }).close;
+      if (typeof open !== "string" || typeof close !== "string") return "invalid";
+      if (!HHMM_RE.test(open) || !HHMM_RE.test(close)) return "invalid";
+      cleanRanges.push({ open, close });
+    }
+    if (cleanRanges.length > 0) out[day] = cleanRanges;
+  }
+  return out;
 }
 
 function isUrl(v: unknown): v is string {
