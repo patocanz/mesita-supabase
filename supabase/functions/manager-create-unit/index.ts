@@ -273,6 +273,16 @@ Deno.serve(async (req) => {
   // discard the rest. Running them concurrently shaves ~1s off the cold
   // create flow.
   const candidateUrls = photos.map((p) => p.photoUri).filter(Boolean);
+  // Instagram follower count is a strong "is this place culturally
+  // relevant?" signal on the Place page's Signals tile. Fetch it in
+  // parallel with the synth + photo ranking so it doesn't add latency.
+  // Best-effort: if Instagram blocks Firecrawl or the regex misses, the
+  // value stays null and the UI shows the "couldn't pull this" note.
+  const instagramFollowersPromise = fetchInstagramFollowers(
+    channels.instagram_url ?? null,
+    FIRECRAWL_KEY,
+  );
+
   const [synth, ranking] = await Promise.all([
     synthesiseVenue(
       {
@@ -307,6 +317,7 @@ Deno.serve(async (req) => {
       OPENAI_KEY,
     ),
   ]);
+  const instagramFollowers = await instagramFollowersPromise;
 
   // ── Step 4: Persist (service role; RLS allows reads only) ──
   // `admin` was already instantiated above for the pre-flight placeId
@@ -392,6 +403,12 @@ Deno.serve(async (req) => {
     tripadvisor_url: channels.tripadvisor_url,
     google_maps_url: channels.google_maps_url,
     email,
+    // Signal columns surfaced on the Place page's Signals tiles. The
+    // mesita_* counterparts are populated by aggregation jobs later; the
+    // Google + Instagram values come straight from the enrichment pass.
+    google_stars_overall: details.rating ?? null,
+    google_review_count: details.userRatingCount ?? null,
+    instagram_followers_count: instagramFollowers,
   };
 
   const { data: venue, error: venueError } = await admin
@@ -460,6 +477,9 @@ Deno.serve(async (req) => {
         openaiError: synth.synthError,
         channelCount:
           Object.values(channels).filter((v) => !!v).length + (email ? 1 : 0),
+        googleRating: details.rating ?? null,
+        googleReviewCount: details.userRatingCount ?? null,
+        instagramFollowers,
       },
     },
     201,
@@ -942,6 +962,68 @@ async function fetchFirecrawl(
   } catch {
     return null;
   }
+}
+
+// Best-effort scrape of an Instagram profile page to extract follower
+// count. Returns null on anything that goes wrong — missing key, missing
+// URL, Firecrawl error, IG blocking the bot, regex miss. The Signals tile
+// already renders a "couldn't pull this" note in that case.
+//
+// Why this exists separately from fetchFirecrawl: that helper rejects
+// social URLs deliberately (homepage scrape isn't the right input for
+// an Instagram timeline). For follower count we DO want the Instagram
+// page itself, so we wrap a parallel Firecrawl call here.
+async function fetchInstagramFollowers(
+  igUrl: string | null,
+  apiKey: string | undefined,
+): Promise<number | null> {
+  if (!igUrl || !apiKey) return null;
+  try {
+    const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: igUrl,
+        formats: ["markdown"],
+        onlyMainContent: false,
+        timeout: 15000,
+      }),
+    });
+    if (!r.ok) return null;
+    const d = (await r.json()) as { data?: { markdown?: string } };
+    return parseInstagramFollowers(d.data?.markdown ?? "");
+  } catch {
+    return null;
+  }
+}
+
+// Pulls a follower count out of an Instagram profile markdown dump. The
+// canonical place is the og:description meta — "X Followers, Y Following,
+// Z Posts" — which Firecrawl renders as plain text. We also accept the
+// "X Followers" snippet that appears in-page on the profile header.
+// Returns null when nothing recognisable shows up.
+export function parseInstagramFollowers(markdown: string): number | null {
+  if (!markdown) return null;
+  // Match "12.3K Followers", "12,345 Followers", "1.2M Followers", etc.
+  // Look for the first occurrence so the og:description "X Followers, Y
+  // Following" pattern wins over any noisy in-body matches.
+  const m = markdown.match(/([\d][\d.,]*\s*[KkMm]?)\s*Followers/);
+  if (!m) return null;
+  let raw = m[1].trim().toLowerCase().replace(/,/g, "");
+  let mult = 1;
+  if (raw.endsWith("k")) {
+    mult = 1_000;
+    raw = raw.slice(0, -1);
+  } else if (raw.endsWith("m")) {
+    mult = 1_000_000;
+    raw = raw.slice(0, -1);
+  }
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1e10) return null;
+  return Math.round(n * mult);
 }
 
 // ───────────────────────────────────────────────────────────────────────────
