@@ -64,9 +64,6 @@ type Prediction = {
   mainText: string;
   secondaryText: string;
   status: PredictionStatus;
-  // Legacy boolean kept so an older frontend that pre-dates `status`
-  // still gets a usable signal. Always equals (status !== "not_in_mesita").
-  inMesita: boolean;
 };
 
 Deno.serve(async (req) => {
@@ -96,7 +93,7 @@ Deno.serve(async (req) => {
   const sessionToken = (body.sessionToken ?? "").toString();
 
   if (input.length < 2) {
-    return json({ ok: true, predictions: [], mock: false });
+    return json({ ok: true, predictions: [] });
   }
   if (!sessionToken) {
     return json({ ok: false, error: "Missing sessionToken" });
@@ -105,6 +102,12 @@ Deno.serve(async (req) => {
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
   const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const admin =
+    SUPABASE_URL && SERVICE_KEY
+      ? createClient(SUPABASE_URL, SERVICE_KEY, {
+          auth: { persistSession: false, autoRefreshToken: false },
+        })
+      : null;
 
   // We need the caller's id to flag verified_partner_self vs _other on
   // the Mesita-side matches. An unauthenticated call still gets useful
@@ -128,9 +131,7 @@ Deno.serve(async (req) => {
   // independently; we merge whatever comes back.
   const [googleResult, mesitaResult] = await Promise.allSettled([
     fetchGooglePredictions(input, sessionToken, apiKey),
-    SUPABASE_URL && SERVICE_KEY
-      ? fetchMesitaPredictions(SUPABASE_URL, SERVICE_KEY, input, userId)
-      : Promise.resolve([] as Prediction[]),
+    admin ? fetchMesitaPredictions(admin, input, userId) : Promise.resolve([] as Prediction[]),
   ]);
 
   if (googleResult.status === "rejected" && mesitaResult.status === "rejected") {
@@ -157,23 +158,14 @@ Deno.serve(async (req) => {
 
   // Merge: Mesita-side hits take precedence (their status wins over a
   // Google entry with the same placeId), then any remaining Google
-  // entries follow. Stable order.
+  // entries follow. Google's structured text is usually nicer, so we
+  // keep its mainText/secondaryText but graft Mesita's status on top
+  // when the placeId is in both sources.
   const byPlaceId = new Map<string, Prediction>();
   for (const p of mesitaPreds) byPlaceId.set(p.placeId, p);
   for (const p of googlePreds) {
     const existing = byPlaceId.get(p.placeId);
-    if (existing) {
-      // Google's structured format is usually nicer text; keep Mesita's
-      // status (and the derived inMesita flag) when both sources agree
-      // on the placeId, and prefer Google's mainText/secondaryText.
-      byPlaceId.set(p.placeId, {
-        ...p,
-        status: existing.status,
-        inMesita: existing.inMesita,
-      });
-    } else {
-      byPlaceId.set(p.placeId, p);
-    }
+    byPlaceId.set(p.placeId, existing ? { ...p, status: existing.status } : p);
   }
 
   // Backfill status for predictions Google returned but the ILIKE
@@ -184,28 +176,24 @@ Deno.serve(async (req) => {
   const orphanPlaceIds = Array.from(byPlaceId.values())
     .filter((p) => p.status === "not_in_mesita")
     .map((p) => p.placeId);
-  if (orphanPlaceIds.length > 0 && SUPABASE_URL && SERVICE_KEY) {
-    const statusByPlaceId = await enrichByPlaceIds(
-      SUPABASE_URL,
-      SERVICE_KEY,
-      orphanPlaceIds,
-      userId,
-    );
+  if (orphanPlaceIds.length > 0 && admin) {
+    const statusByPlaceId = await enrichByPlaceIds(admin, orphanPlaceIds, userId);
     for (const [placeId, status] of statusByPlaceId) {
       const existing = byPlaceId.get(placeId);
       if (!existing) continue;
-      byPlaceId.set(placeId, { ...existing, status, inMesita: true });
+      byPlaceId.set(placeId, { ...existing, status });
     }
   }
 
   // Already-in-Mesita predictions surface first so the operator sees
   // the existing profile before the long tail of Google matches.
   const predictions = Array.from(byPlaceId.values()).sort((a, b) => {
-    if (a.inMesita === b.inMesita) return 0;
-    return a.inMesita ? -1 : 1;
+    const aIn = a.status !== "not_in_mesita";
+    const bIn = b.status !== "not_in_mesita";
+    return aIn === bIn ? 0 : aIn ? -1 : 1;
   });
 
-  return json({ ok: true, predictions, mock: false });
+  return json({ ok: true, predictions });
 });
 
 // ── Google ────────────────────────────────────────────────────────────
@@ -266,7 +254,6 @@ async function fetchGooglePredictions(
       mainText: p.structuredFormat?.mainText?.text ?? p.text?.text ?? "",
       secondaryText: p.structuredFormat?.secondaryText?.text ?? "",
       status: "not_in_mesita",
-      inMesita: false,
     }))
     .filter((p) => p.placeId && p.mainText);
   return { predictions };
@@ -275,14 +262,10 @@ async function fetchGooglePredictions(
 // ── Mesita-side fallback ──────────────────────────────────────────────
 
 async function fetchMesitaPredictions(
-  supabaseUrl: string,
-  serviceKey: string,
+  admin: ReturnType<typeof createClient>,
   input: string,
   callerId: string | null,
 ): Promise<Prediction[]> {
-  const admin = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
   // ILIKE prefix-and-contains so "strana" finds both "Strana" and "Casa
   // Strana, Monterrey". Limit small — Google is the primary surface;
   // this is a fallback for the long-tail case where Google misses.
@@ -311,7 +294,6 @@ async function fetchMesitaPredictions(
     mainText: v.name,
     secondaryText: v.address ?? "Already on Mesita",
     status: statuses.get(v.google_place_id) ?? "web_listed",
-    inMesita: true,
   }));
 }
 
@@ -325,14 +307,10 @@ function escapeIlike(s: string): string {
 // to backfill status for Google-sourced predictions the ILIKE fallback
 // missed because the input string didn't match the venue name.
 async function enrichByPlaceIds(
-  supabaseUrl: string,
-  serviceKey: string,
+  admin: ReturnType<typeof createClient>,
   placeIds: string[],
   callerId: string | null,
 ): Promise<Map<string, PredictionStatus>> {
-  const admin = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
   const { data, error } = await admin
     .from("venues")
     .select("id, google_place_id")

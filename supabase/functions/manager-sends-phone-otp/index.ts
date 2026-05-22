@@ -22,6 +22,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { randomSixDigits, sha256Hex } from "../_shared/otp.ts";
 
 type Body = { venueId?: string; requesterEmail?: string };
 
@@ -179,18 +180,3 @@ Deno.serve(async (req) => {
   });
 });
 
-// ── helpers ───────────────────────────────────────────────────────────
-
-function randomSixDigits(): string {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return (buf[0] % 1_000_000).toString().padStart(6, "0");
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
