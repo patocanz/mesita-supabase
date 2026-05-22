@@ -9,6 +9,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { VENUE_PUBLIC_COLUMNS } from "../_shared/venue-columns.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -51,9 +52,7 @@ Deno.serve(async (req) => {
 
   const { data, error } = await supabase
     .from("venues")
-    .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, email, created_at",
-    )
+    .select(VENUE_PUBLIC_COLUMNS)
     .order("created_at", { ascending: false })
     .limit(limit);
 
