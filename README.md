@@ -98,19 +98,12 @@ One webhook endpoint per concern, configured in Stripe dashboard:
 
 | Endpoint URL | Listens to |
 |---|---|
-| `/functions/v1/stripe-receive-connect-event` | `account.updated`, `account.application.deauthorized` |
-| `/functions/v1/stripe-receive-bill-payment-event` | `checkout.session.completed`, `charge.refunded`, `charge.dispute.created` |
-| `/functions/v1/stripe-receive-subscription-event` | `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted` |
-| `/functions/v1/stripe-receive-payout-event` | `payout.paid`, `payout.failed`, `transfer.created` |
+| `/functions/v1/webhook-receives-stripe-connect` | `account.updated`, `account.application.deauthorized` |
+| `/functions/v1/webhook-receives-stripe-bill-payment` | `checkout.session.completed`, `charge.refunded`, `charge.dispute.created` |
+| `/functions/v1/webhook-receives-stripe-subscriptions` | `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted` |
+| `/functions/v1/webhook-receives-stripe-payouts` | `payout.paid`, `payout.failed`, `transfer.created` |
 
-Each endpoint gets its own webhook signing secret:
-
-| EF | Env var |
-|---|---|
-| `stripe-receive-connect-event` | `STRIPE_WEBHOOK_SECRET_CONNECT` |
-| `stripe-receive-bill-payment-event` | `STRIPE_WEBHOOK_SECRET_BILL_PAYMENT` |
-| `stripe-receive-subscription-event` | `STRIPE_WEBHOOK_SECRET_SUBSCRIPTION` |
-| `stripe-receive-payout-event` | `STRIPE_WEBHOOK_SECRET_PAYOUT` |
+Each endpoint gets its own `STRIPE_WEBHOOK_SECRET`-prefixed secret (e.g. `STRIPE_WEBHOOK_SECRET_CONNECT`) — see the individual EF for the exact env var name.
 
 ### Architecture rules
 
