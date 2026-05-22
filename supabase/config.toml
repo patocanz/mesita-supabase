@@ -243,17 +243,3 @@ verify_jwt = true
 # console's "open in manager" link generator.
 [functions.admin-find-venue]
 verify_jwt = true
-
-# --- Stripe Connect (Formal Verified Partners) ---
-#
-# Express account onboarding for Formal venues so they can receive
-# payouts from Mesita's platform balance. Informal venues never run
-# this path — they stay off the rail.
-
-[functions.manager-start-connect-onboarding]
-verify_jwt = true
-
-# Webhook endpoint. Stripe is the caller; no JWT exists. Signature
-# verification gates the request inside the handler instead.
-[functions.stripe-receive-connect-event]
-verify_jwt = false
