@@ -12,6 +12,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { isOnDomain } from "../_shared/onboarding.ts";
 
 const GOOGLE_FIELD_MASK = [
   "id",
@@ -253,7 +254,10 @@ Deno.serve(async (req) => {
     details.googleMapsUri,
     ...(firecrawl?.links ?? []),
   ]);
-  const email = extractEmailFromMarkdown(firecrawl?.markdown ?? null);
+  const email = extractEmailFromMarkdown(
+    firecrawl?.markdown ?? null,
+    channels.website_url ?? details.websiteUri ?? null,
+  );
 
   // ── Step 3: OpenAI synthesis (optional — falls back to heuristics) ──
   const synth = await synthesiseVenue(
@@ -756,25 +760,69 @@ function classifyLinks(input: (string | null | undefined)[]): Channels {
   return result;
 }
 
-// One regex over the Firecrawl markdown. Skip obvious noise (no-reply,
-// example.com, sentry / image-host garbage). Anything else — including
-// gmail addresses — is fine; small venues often run on gmail.
-function extractEmailFromMarkdown(md: string | null): string | null {
+// Score-and-pick over every email in the Firecrawl markdown.
+//
+// Why scoring vs. "first match wins": venue pages often include a
+// developer's personal gmail in attribution somewhere ("site by
+// jdoe@gmail.com") long before the venue's own contact address. We
+// prefer the one most likely to belong to the venue: on-domain >
+// generic provider (gmail/hotmail/etc., which small venues do run on)
+// > anything else. Junk patterns (noreply, sentry, wix placeholders)
+// are rejected outright.
+//
+// `websiteUrl` is the venue's primary website; passing null skips the
+// on-domain bonus and falls back to free-provider preference.
+function extractEmailFromMarkdown(
+  md: string | null,
+  websiteUrl: string | null,
+): string | null {
   if (!md) return null;
   const re = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+  let best: { email: string; score: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = re.exec(md)) !== null) {
     const email = m[0].toLowerCase();
-    if (email.startsWith("noreply@")) continue;
-    if (email.startsWith("no-reply@")) continue;
-    if (email.endsWith("@example.com")) continue;
-    if (email.endsWith("@sentry.io")) continue;
-    if (email.endsWith("@wixpress.com")) continue;
-    if (email.endsWith("@wordpress.com")) continue;
-    return email;
+    if (isJunkEmail(email)) continue;
+    const score = scoreEmail(email, websiteUrl);
+    if (!best || score > best.score) best = { email, score };
   }
-  return null;
+  return best?.email ?? null;
 }
+
+function isJunkEmail(email: string): boolean {
+  if (email.startsWith("noreply@")) return true;
+  if (email.startsWith("no-reply@")) return true;
+  if (email.endsWith("@example.com")) return true;
+  if (email.endsWith("@sentry.io")) return true;
+  if (email.endsWith("@wixpress.com")) return true;
+  if (email.endsWith("@wordpress.com")) return true;
+  return false;
+}
+
+// Higher is better. On-domain wins because it qualifies the venue for
+// the ai_email auto-verify path; free-provider is the small-venue
+// reality (info@venue.mx is rare, info.venue@gmail.com common).
+function scoreEmail(email: string, websiteUrl: string | null): number {
+  if (websiteUrl && isOnDomain(email, websiteUrl)) return 100;
+  const at = email.indexOf("@");
+  if (at >= 0 && FREE_EMAIL_PROVIDERS.has(email.slice(at + 1))) return 50;
+  return 1;
+}
+
+const FREE_EMAIL_PROVIDERS = new Set([
+  "gmail.com",
+  "googlemail.com",
+  "hotmail.com",
+  "outlook.com",
+  "yahoo.com",
+  "yahoo.com.mx",
+  "icloud.com",
+  "live.com",
+  "live.com.mx",
+  "msn.com",
+  "protonmail.com",
+  "proton.me",
+]);
 
 function extractImagesFromMarkdown(md: string): string[] {
   if (!md) return [];
@@ -826,7 +874,14 @@ async function fetchFirecrawl(
       body: JSON.stringify({
         url: websiteUri,
         formats: ["markdown", "links"],
-        onlyMainContent: true,
+        // Keep footer + header chrome. Venue contact details (email,
+        // phone, social) almost always live in the footer, and
+        // onlyMainContent strips it. Firecrawl bills per page, not per
+        // byte, so this is free.
+        onlyMainContent: false,
+        // Drop nav-only chrome that crowds out real signal but isn't
+        // valuable here.
+        excludeTags: ["nav"],
         timeout: 20000,
       }),
     });
@@ -835,8 +890,14 @@ async function fetchFirecrawl(
       data?: { markdown?: string; links?: string[] };
     };
     return {
-      markdown: (d.data?.markdown ?? "").slice(0, 12000),
-      links: (d.data?.links ?? []).slice(0, 20),
+      // Bigger budget: footers add a few KB; we want them in the
+      // email regex pass and the OpenAI synthesis context. gpt-4o-mini
+      // happily eats 16k chars at $0.15/M tokens.
+      markdown: (d.data?.markdown ?? "").slice(0, 16000),
+      // More links too — social icons usually live in the footer, so
+      // classifyLinks now catches IG/FB/X profiles we previously
+      // missed when scraping main-content-only.
+      links: (d.data?.links ?? []).slice(0, 40),
     };
   } catch {
     return null;
