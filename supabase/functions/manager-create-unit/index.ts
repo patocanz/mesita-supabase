@@ -1181,31 +1181,42 @@ async function rankPhotosWithVision(
     "on the venue page indefinitely, so they MUST BE EVERGREEN — anything " +
     "tied to a specific date, holiday, or limited campaign is actively " +
     "harmful and must be rejected. Score each image 0-100 on conversion " +
-    "potential. 100 looks like an editorial shot of the venue itself: " +
-    "sharp focus, intentional lighting, conveys vibe (atmosphere, mood, " +
-    "ambience), shows the actual space or a signature dish. HARD-FAIL to " +
-    "0-10 (so it falls out of the top selection): promotional creatives, " +
-    "event flyers, dated specials (Christmas / Navidad, Día de las Madres, " +
-    "Día del Padre, San Valentín, Halloween, Día de Muertos, Año Nuevo, " +
-    "Black Friday, Independencia, aniversario, grand opening, etc.), any " +
-    "image showing a price tag, a percentage discount, a 2x1 / 3x2 offer, " +
-    "a year burned into the artwork (2022, 2023, 2024, …), countdowns, " +
-    "RSVP / live-music / DJ-set / brunch-Sunday posters, ticket art, and " +
-    "anything that reads as a marketing graphic or social-media campaign " +
-    "rather than a photograph of the place. Disambiguation: a genuine " +
-    "photograph of the dining room dressed for the holidays is fine when " +
-    "the focus is the space itself; a designed Christmas-promo card with " +
-    "text overlay is NOT. ALSO penalise: blurry, dim phone snaps, " +
-    "watermarks, screenshots, generic stock, logos alone, menus as PDFs, " +
-    "group selfies, and images that don't appear to be of this venue. " +
-    "Return STRICT JSON only.";
+    "potential. THE COVER (top-ranked photo) MUST SHOW THE PLACE ITSELF, " +
+    "NOT FOOD. A guest swiping should first see where they're going — the " +
+    "dining room, the bar, the patio, the rooftop, the storefront, the " +
+    "architectural detail — so they can picture being there. Cap food " +
+    "photos at 85 unless every space photo on offer is unusable (blurry, " +
+    "watermarked, clearly not this venue). Within the SPACE bucket, 100 " +
+    "looks like an editorial shot of the venue: wide composition, sharp " +
+    "focus, intentional lighting, conveys vibe (atmosphere, mood, " +
+    "ambience), people optional but never centred. Food photos earn 70-85 " +
+    "when they're sharp, well-lit signature-dish shots; lower otherwise. " +
+    "Result: the gallery should open with two or three SPACE images " +
+    "before any food appears, then food and drink can follow. HARD-FAIL " +
+    "to 0-10 (so it falls out of the top selection): promotional " +
+    "creatives, event flyers, dated specials (Christmas / Navidad, Día " +
+    "de las Madres, Día del Padre, San Valentín, Halloween, Día de " +
+    "Muertos, Año Nuevo, Black Friday, Independencia, aniversario, grand " +
+    "opening, etc.), any image showing a price tag, a percentage " +
+    "discount, a 2x1 / 3x2 offer, a year burned into the artwork (2022, " +
+    "2023, 2024, …), countdowns, RSVP / live-music / DJ-set / " +
+    "brunch-Sunday posters, ticket art, and anything that reads as a " +
+    "marketing graphic or social-media campaign rather than a photograph " +
+    "of the place. Disambiguation: a genuine photograph of the dining " +
+    "room dressed for the holidays is fine when the focus is the space " +
+    "itself; a designed Christmas-promo card with text overlay is NOT. " +
+    "ALSO penalise: blurry, dim phone snaps, watermarks, screenshots, " +
+    "generic stock, logos alone, menus as PDFs, group selfies, and " +
+    "images that don't appear to be of this venue. Return STRICT JSON only.";
 
   const venueLabel = [context.name, context.category, context.city]
     .filter(Boolean)
     .join(" · ");
   const userText =
     `Venue: ${venueLabel}. Rank these ${urls.length} candidate photos for ` +
-    "the venue card and gallery. Return JSON of the form " +
+    "the venue card and gallery. Remember: the COVER must be the space " +
+    "itself, not food. Lead with two or three SPACE photos before any " +
+    "food photo. Return JSON of the form " +
     `{"ranking":[{"index":N,"score":0-100,"reason":"short reason"}, ...]} ` +
     "sorted by score descending. Include every image exactly once. The " +
     "index refers to the order the images are presented in this message " +
