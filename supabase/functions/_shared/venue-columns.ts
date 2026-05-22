@@ -73,6 +73,10 @@ const COLUMNS: readonly string[] = [
   "mesita_review_count",
   "mesita_visitor_count",
   "instagram_followers_count",
+  // Promos page section toggles. Boolean, manager-controlled, persisted
+  // so the on/off state survives page reloads.
+  "segmentation_basic_enabled",
+  "segmentation_advanced_enabled",
   "email",
   "created_at",
 ];

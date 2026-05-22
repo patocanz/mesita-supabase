@@ -66,6 +66,11 @@ type UpdateBody = {
   tags?: string[];
   whatsapp_pr_urls?: string[];
   instagram_pr_urls?: string[];
+  // Promos page section toggles — Basic + Advanced segmentation can be
+  // collapsed by the manager. Defaults align with the migration: basic
+  // on, advanced off.
+  segmentation_basic_enabled?: boolean;
+  segmentation_advanced_enabled?: boolean;
 };
 
 type HoursRange = { open: string; close: string };
@@ -359,6 +364,20 @@ Deno.serve(async (req) => {
     }
     const clean = value.filter(isUrl).slice(0, MAX_PR_LINKS);
     update[arrayField] = clean;
+  }
+
+  // Promos section toggles. Strict boolean only — silently coerce
+  // truthy / "true" strings would let stale clients write garbage.
+  for (const boolField of [
+    "segmentation_basic_enabled",
+    "segmentation_advanced_enabled",
+  ] as const) {
+    if (!(boolField in body)) continue;
+    const value = body[boolField];
+    if (typeof value !== "boolean") {
+      return json({ ok: false, error: `${boolField} must be boolean` }, 400);
+    }
+    update[boolField] = value;
   }
 
   // Email: not a URL. Just trim + sanity-check the shape (has @ and a dot
