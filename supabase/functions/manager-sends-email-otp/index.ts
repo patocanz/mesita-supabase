@@ -25,6 +25,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { isOnDomain } from "../_shared/onboarding.ts";
+import { randomSixDigits, sha256Hex } from "../_shared/otp.ts";
 
 type Body = { venueId?: string; requesterEmail?: string };
 
@@ -172,38 +174,3 @@ Deno.serve(async (req) => {
   });
 });
 
-// ── helpers ───────────────────────────────────────────────────────────
-
-// True when the email's domain matches the website's hostname, ignoring
-// "www." on either side. Subdomain matches count in both directions so a
-// venue's `hola@reservas.casaluminar.mx` still passes against website
-// `https://casaluminar.mx`. Returns false on any parse error.
-function isOnDomain(email: string, websiteUrl: string): boolean {
-  const at = email.indexOf("@");
-  if (at < 1) return false;
-  const emailHost = email.slice(at + 1).toLowerCase();
-  let siteHost: string;
-  try {
-    siteHost = new URL(websiteUrl).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  const stripWww = (h: string) => h.replace(/^www\./, "");
-  const a = stripWww(emailHost);
-  const b = stripWww(siteHost);
-  return a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
-}
-
-function randomSixDigits(): string {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return (buf[0] % 1_000_000).toString().padStart(6, "0");
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
