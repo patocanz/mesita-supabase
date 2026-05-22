@@ -13,6 +13,10 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 
 const MAX_PHOTOS = 30;
+const MAX_TAGS = 12;
+const MAX_TAG_LEN = 40;
+const MAX_PR_LINKS = 10;
+const MAX_DESCRIPTION_LEN = 600;
 
 type UpdateBody = {
   id?: string;
@@ -54,6 +58,12 @@ type UpdateBody = {
   google_maps_url?: string | null;
   // Plain contact (not URL-shaped)
   email?: string | null;
+  // Place-redesign editable surface (Manager-E=YES on the Components spec).
+  description?: string | null;
+  menu_pdf_url?: string | null;
+  tags?: string[];
+  whatsapp_pr_urls?: string[];
+  instagram_pr_urls?: string[];
 };
 
 const URL_FIELDS = [
@@ -275,6 +285,48 @@ Deno.serve(async (req) => {
     update[field] = raw.trim();
   }
 
+  // Place-redesign editable fields.
+  if ("description" in body) {
+    update.description = optString(body.description, MAX_DESCRIPTION_LEN);
+  }
+  if ("menu_pdf_url" in body) {
+    const raw = body.menu_pdf_url;
+    if (raw == null || (typeof raw === "string" && raw.trim() === "")) {
+      update.menu_pdf_url = null;
+    } else if (!isUrl(raw)) {
+      return json({ ok: false, error: "menu_pdf_url must be a valid https:// URL" }, 400);
+    } else {
+      update.menu_pdf_url = raw.trim();
+    }
+  }
+  if ("tags" in body) {
+    if (!Array.isArray(body.tags)) {
+      return json({ ok: false, error: "tags must be an array of strings" }, 400);
+    }
+    // Lowercase + trim + dedupe in one pass. Empty entries drop out so the
+    // form can submit a partially typed list without rejecting the request.
+    const seen = new Set<string>();
+    const clean: string[] = [];
+    for (const t of body.tags) {
+      if (typeof t !== "string") continue;
+      const norm = t.trim().toLowerCase().slice(0, MAX_TAG_LEN);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      clean.push(norm);
+      if (clean.length >= MAX_TAGS) break;
+    }
+    update.tags = clean;
+  }
+  for (const arrayField of ["whatsapp_pr_urls", "instagram_pr_urls"] as const) {
+    if (!(arrayField in body)) continue;
+    const value = body[arrayField];
+    if (!Array.isArray(value)) {
+      return json({ ok: false, error: `${arrayField} must be an array of https:// URLs` }, 400);
+    }
+    const clean = value.filter(isUrl).slice(0, MAX_PR_LINKS);
+    update[arrayField] = clean;
+  }
+
   // Email: not a URL. Just trim + sanity-check the shape (has @ and a dot
   // after it). Empty / null clears the field.
   if ("email" in body) {
@@ -304,7 +356,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, phone, pitch, story, cashback_percent, photos, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, email, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, hours, phone, pitch, story, description, cashback_percent, photos, menu_pdf_url, tags, whatsapp_pr_urls, instagram_pr_urls, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, google_business_url, google_stars_overall, google_review_count, google_visitor_count, mesita_stars_overall, mesita_stars_food, mesita_stars_service, mesita_stars_ambience, mesita_review_count, mesita_visitor_count, instagram_followers_count, email, created_at, updated_at",
     )
     .single();
   if (updateError) {
