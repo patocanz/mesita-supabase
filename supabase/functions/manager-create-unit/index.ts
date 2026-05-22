@@ -39,7 +39,14 @@ const GOOGLE_FIELD_MASK = [
   "photos",
 ].join(",");
 
+// Sourcing budget: how many candidate photo URLs we collect from Google CSE
+// + Firecrawl + Google Places before any quality pass.
 const MAX_PHOTOS = 20;
+// What we actually persist after the gpt-4o-mini vision ranking. Half the
+// candidate pool is dropped on purpose — the swipe-card cover and gallery
+// only show a handful, so the floor 10 are dead weight that slow loads and
+// dilute the venue's first impression.
+const MAX_PHOTOS_TO_KEEP = 10;
 
 type EnrichBody = { placeId?: string };
 
@@ -259,29 +266,47 @@ Deno.serve(async (req) => {
     channels.website_url ?? details.websiteUri ?? null,
   );
 
-  // ── Step 3: OpenAI synthesis (optional — falls back to heuristics) ──
-  const synth = await synthesiseVenue(
-    {
-      name: venueName,
-      city,
-      country,
-      address,
-      googlePrimaryType: details.primaryType ?? null,
-      googlePrimaryTypeDisplay: details.primaryTypeDisplayName?.text ?? null,
-      googleTypes: details.types ?? [],
-      googleEditorial: details.editorialSummary?.text ?? null,
-      googleGenerative:
-        details.generativeSummary?.overview?.text ??
-        details.generativeSummary?.description?.text ??
-        null,
-      googleReviewSummary: details.reviewSummary?.text?.text ?? null,
-      googleHours: details.regularOpeningHours?.weekdayDescriptions ?? [],
-      googlePriceLevel: priceLevelFromGoogle(details.priceLevel),
-      firecrawlMarkdown: firecrawl?.markdown ?? null,
-      perplexityBrief: perplexity?.brief ?? null,
-    },
-    OPENAI_KEY,
-  );
+  // ── Step 3: OpenAI synthesis + vision photo ranking (parallel) ──
+  // Two independent OpenAI calls. synthesiseVenue writes the catalog row
+  // (name, vibe, pitch, story); rankPhotosWithVision scores each candidate
+  // image on conversion potential so we keep only the strongest 10 and
+  // discard the rest. Running them concurrently shaves ~1s off the cold
+  // create flow.
+  const candidateUrls = photos.map((p) => p.photoUri).filter(Boolean);
+  const [synth, ranking] = await Promise.all([
+    synthesiseVenue(
+      {
+        name: venueName,
+        city,
+        country,
+        address,
+        googlePrimaryType: details.primaryType ?? null,
+        googlePrimaryTypeDisplay: details.primaryTypeDisplayName?.text ?? null,
+        googleTypes: details.types ?? [],
+        googleEditorial: details.editorialSummary?.text ?? null,
+        googleGenerative:
+          details.generativeSummary?.overview?.text ??
+          details.generativeSummary?.description?.text ??
+          null,
+        googleReviewSummary: details.reviewSummary?.text?.text ?? null,
+        googleHours: details.regularOpeningHours?.weekdayDescriptions ?? [],
+        googlePriceLevel: priceLevelFromGoogle(details.priceLevel),
+        firecrawlMarkdown: firecrawl?.markdown ?? null,
+        perplexityBrief: perplexity?.brief ?? null,
+      },
+      OPENAI_KEY,
+    ),
+    rankPhotosWithVision(
+      candidateUrls,
+      {
+        name: venueName,
+        category:
+          details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
+        city,
+      },
+      OPENAI_KEY,
+    ),
+  ]);
 
   // ── Step 4: Persist (service role; RLS allows reads only) ──
   // `admin` was already instantiated above for the pre-flight placeId
@@ -296,7 +321,16 @@ Deno.serve(async (req) => {
 
   const slug = await ensureUniqueSlug(admin, synth.slug);
 
-  const photoUrls = photos.map((p) => p.photoUri).filter(Boolean).slice(0, 20);
+  // Keep only the top MAX_PHOTOS_TO_KEEP photos as ranked by gpt-4o-mini
+  // vision. On any ranking failure (no key, OpenAI error, parse error) we
+  // fall back to the source-priority order (CSE > Firecrawl > Places),
+  // which is still a reasonable cover-photo bet — but we still cap at the
+  // smaller kept limit so we never write more than the keep budget. The
+  // dropped URLs are intentionally not persisted anywhere.
+  const photoUrls = (ranking.ok ? ranking.orderedUrls : candidateUrls).slice(
+    0,
+    MAX_PHOTOS_TO_KEEP,
+  );
 
   const closesAt =
     synth.closes_at ?? closesAtFromHours(details.regularOpeningHours?.weekdayDescriptions ?? []);
@@ -413,7 +447,13 @@ Deno.serve(async (req) => {
       venue,
       enrichment: {
         google: true,
+        // photoCount = persisted count after the vision-rank cap (was the
+        // raw merge count before ranking shipped). Kept under the same key
+        // so existing admin tooling doesn't break.
         photoCount: photoUrls.length,
+        photoCandidates: candidateUrls.length,
+        photoRanked: ranking.ok,
+        photoRankError: ranking.ok ? null : ranking.reason,
         firecrawl: !!firecrawl?.markdown,
         perplexity: !!perplexity?.brief,
         openai: synth.source === "openai",
@@ -1092,6 +1132,148 @@ function synthFallback(input: SynthInput, reason: string): SynthOutput {
     source: "fallback",
     synthError: reason,
   };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// OpenAI vision — photo ranking
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The photo merge upstream returns up to MAX_PHOTOS candidate URLs in
+// source-priority order (CSE > Firecrawl > Places). Priority is a coarse
+// proxy for quality at best — within each source, a hero shot and a
+// blurry phone snap have the same rank. This pass asks gpt-4o-mini to
+// look at every candidate and score it on what Mesita actually needs:
+// a swipe-card cover image that makes a guest stop scrolling.
+//
+// One multi-image vision call. Low detail (~85 tokens / image) is fine
+// because we're judging composition + vibe, not reading menus. 20 images
+// at low detail + a small JSON response ≈ $0.0006 per venue on the mini
+// model — cheap enough to run on every create without guarding.
+//
+// On any failure the caller falls back to source-priority order and
+// still takes the top MAX_PHOTOS_TO_KEEP, so a flaky OpenAI run degrades
+// to "before this ranker existed" rather than blocking the create.
+type RankItem = { url: string; score: number; reason: string | null };
+type RankResult =
+  | { ok: true; orderedUrls: string[]; scores: RankItem[] }
+  | { ok: false; reason: string };
+
+async function rankPhotosWithVision(
+  urls: string[],
+  context: { name: string; category: string | null; city: string | null },
+  apiKey: string | undefined,
+): Promise<RankResult> {
+  if (!apiKey) return { ok: false, reason: "no_openai_key" };
+  if (urls.length === 0) return { ok: true, orderedUrls: [], scores: [] };
+  // One image isn't a ranking problem — skip the API call entirely.
+  if (urls.length === 1) {
+    return {
+      ok: true,
+      orderedUrls: [urls[0]],
+      scores: [{ url: urls[0], score: 100, reason: "only_candidate" }],
+    };
+  }
+
+  const systemPrompt =
+    "You are a senior visual curator for Mesita, a venue discovery app for " +
+    "restaurants, cafés, bars, and nightlife in Mexico. Each venue gets a " +
+    "swipe-card cover photo and a small gallery on its profile. Photos must " +
+    "make a guest stop scrolling and book. Score each image 0-100 on " +
+    "conversion potential. 100 looks like an editorial shot of the venue " +
+    "itself: sharp focus, intentional lighting, conveys vibe (atmosphere, " +
+    "mood, ambience), shows the actual space or a signature dish. Penalise: " +
+    "blurry, dim phone snaps, watermarks, screenshots, text overlays, " +
+    "generic stock, logos alone, menus as PDFs, group selfies, and images " +
+    "that don't appear to be of this venue. Return STRICT JSON only.";
+
+  const venueLabel = [context.name, context.category, context.city]
+    .filter(Boolean)
+    .join(" · ");
+  const userText =
+    `Venue: ${venueLabel}. Rank these ${urls.length} candidate photos for ` +
+    "the venue card and gallery. Return JSON of the form " +
+    `{"ranking":[{"index":N,"score":0-100,"reason":"short reason"}, ...]} ` +
+    "sorted by score descending. Include every image exactly once. The " +
+    "index refers to the order the images are presented in this message " +
+    "(0-based).";
+
+  // OpenAI's chat completions accept image_url parts inline. Low detail
+  // keeps the per-image token cost flat at ~85 tokens regardless of the
+  // source resolution.
+  const content: unknown[] = [{ type: "text", text: userText }];
+  for (const url of urls) {
+    content.push({
+      type: "image_url",
+      image_url: { url, detail: "low" },
+    });
+  }
+
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content },
+        ],
+      }),
+    });
+    if (!r.ok) {
+      const errText = (await r.text()).slice(0, 240);
+      console.error("[manager-create-unit] vision_rank HTTP", r.status, errText);
+      return { ok: false, reason: `openai_http_${r.status}` };
+    }
+    const data = (await r.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const raw = data.choices?.[0]?.message?.content ?? "";
+    let parsed: { ranking?: { index?: unknown; score?: unknown; reason?: unknown }[] };
+    try {
+      parsed = JSON.parse(raw) as typeof parsed;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "parse error";
+      console.error("[manager-create-unit] vision_rank parse", msg, raw.slice(0, 200));
+      return { ok: false, reason: `parse: ${msg}` };
+    }
+    const ranking = Array.isArray(parsed.ranking) ? parsed.ranking : [];
+
+    // Defensive merge: the model may skip an image, repeat an index, or
+    // hand back a string. Walk the response in the order it gave us,
+    // accept each valid in-range index once, then append any images it
+    // forgot at the bottom in original source-priority order. That way a
+    // partial response still yields a ranked top-N rather than a
+    // truncated one.
+    const seen = new Set<number>();
+    const orderedUrls: string[] = [];
+    const scores: RankItem[] = [];
+    for (const item of ranking) {
+      const idx = Number(item?.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= urls.length) continue;
+      if (seen.has(idx)) continue;
+      seen.add(idx);
+      const score = clampInt(item?.score, 0, 100) ?? 0;
+      const reason = cleanShortString(item?.reason, 80);
+      orderedUrls.push(urls[idx]);
+      scores.push({ url: urls[idx], score, reason });
+    }
+    for (let i = 0; i < urls.length; i += 1) {
+      if (seen.has(i)) continue;
+      orderedUrls.push(urls[i]);
+      scores.push({ url: urls[i], score: 0, reason: "not_scored" });
+    }
+    return { ok: true, orderedUrls, scores };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "vision exception";
+    console.error("[manager-create-unit] vision_rank exception", msg);
+    return { ok: false, reason: `exception: ${msg}` };
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
