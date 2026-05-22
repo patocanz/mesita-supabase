@@ -389,7 +389,7 @@ Deno.serve(async (req) => {
     .update(update)
     .eq("id", venueId)
     .select(
-      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, closes_at, hours, phone, pitch, story, description, cashback_percent, photos, menu_pdf_url, tags, whatsapp_pr_urls, instagram_pr_urls, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, google_business_url, google_stars_overall, google_review_count, google_visitor_count, mesita_stars_overall, mesita_stars_food, mesita_stars_service, mesita_stars_ambience, mesita_review_count, mesita_visitor_count, instagram_followers_count, email, created_at, updated_at",
+      "id, slug, name, category, vibe, price_level, listing_type, status, fiscal_type, plan, lat, lng, address, timezone, closes_at, hours, phone, pitch, story, description, cashback_percent, photos, menu_pdf_url, tags, whatsapp_pr_urls, instagram_pr_urls, website_url, instagram_url, tiktok_url, facebook_url, whatsapp_url, opentable_url, resy_url, uber_eats_url, rappi_url, x_url, youtube_url, threads_url, reddit_url, didi_food_url, tripadvisor_url, google_maps_url, google_business_url, google_stars_overall, google_review_count, google_visitor_count, mesita_stars_overall, mesita_stars_food, mesita_stars_service, mesita_stars_ambience, mesita_review_count, mesita_visitor_count, instagram_followers_count, email, created_at, updated_at",
     )
     .single();
   if (updateError) {
