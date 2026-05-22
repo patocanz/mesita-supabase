@@ -1177,14 +1177,28 @@ async function rankPhotosWithVision(
   const systemPrompt =
     "You are a senior visual curator for Mesita, a venue discovery app for " +
     "restaurants, cafés, bars, and nightlife in Mexico. Each venue gets a " +
-    "swipe-card cover photo and a small gallery on its profile. Photos must " +
-    "make a guest stop scrolling and book. Score each image 0-100 on " +
-    "conversion potential. 100 looks like an editorial shot of the venue " +
-    "itself: sharp focus, intentional lighting, conveys vibe (atmosphere, " +
-    "mood, ambience), shows the actual space or a signature dish. Penalise: " +
-    "blurry, dim phone snaps, watermarks, screenshots, text overlays, " +
-    "generic stock, logos alone, menus as PDFs, group selfies, and images " +
-    "that don't appear to be of this venue. Return STRICT JSON only.";
+    "swipe-card cover photo and a small gallery on its profile. Photos sit " +
+    "on the venue page indefinitely, so they MUST BE EVERGREEN — anything " +
+    "tied to a specific date, holiday, or limited campaign is actively " +
+    "harmful and must be rejected. Score each image 0-100 on conversion " +
+    "potential. 100 looks like an editorial shot of the venue itself: " +
+    "sharp focus, intentional lighting, conveys vibe (atmosphere, mood, " +
+    "ambience), shows the actual space or a signature dish. HARD-FAIL to " +
+    "0-10 (so it falls out of the top selection): promotional creatives, " +
+    "event flyers, dated specials (Christmas / Navidad, Día de las Madres, " +
+    "Día del Padre, San Valentín, Halloween, Día de Muertos, Año Nuevo, " +
+    "Black Friday, Independencia, aniversario, grand opening, etc.), any " +
+    "image showing a price tag, a percentage discount, a 2x1 / 3x2 offer, " +
+    "a year burned into the artwork (2022, 2023, 2024, …), countdowns, " +
+    "RSVP / live-music / DJ-set / brunch-Sunday posters, ticket art, and " +
+    "anything that reads as a marketing graphic or social-media campaign " +
+    "rather than a photograph of the place. Disambiguation: a genuine " +
+    "photograph of the dining room dressed for the holidays is fine when " +
+    "the focus is the space itself; a designed Christmas-promo card with " +
+    "text overlay is NOT. ALSO penalise: blurry, dim phone snaps, " +
+    "watermarks, screenshots, generic stock, logos alone, menus as PDFs, " +
+    "group selfies, and images that don't appear to be of this venue. " +
+    "Return STRICT JSON only.";
 
   const venueLabel = [context.name, context.category, context.city]
     .filter(Boolean)
