@@ -122,9 +122,11 @@ type UrlField = (typeof URL_FIELDS)[number];
 
 const EDITABLE_STATUSES = new Set(["active", "paused", "archived"]);
 
-// Plan catalog the EF accepts. formal_ultra / informal_ultra are kept
-// for backwards compatibility with rows written before the tier was
-// retired — new plan picks come in as free | formal_pro | informal_pro.
+// Plan catalog the EF accepts — all five tiers in the venue_plan enum.
+// Ordered Free → Pro (formal/informal) → Ultra (formal/informal). The
+// mechanic (cashback vs discount) is fixed by fiscal_type; Pro vs Ultra
+// only changes price + visibility tier. See manager UI plans.ts for the
+// picker catalog this is the server-side counterpart of.
 const VALID_PLANS = new Set([
   "free",
   "formal_pro",
