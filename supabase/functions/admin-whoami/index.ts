@@ -8,12 +8,14 @@
 // This EF only authenticates — it doesn't authorize. A non-allowlisted
 // caller still gets a 200 with `isSuperAdmin: false`; the shell handles
 // the rendering. Other admin EFs are the real auth gate.
-//
-// Self-contained: verifies the JWT, reads super_admins via service role.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+} from "../_shared/auth.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -21,34 +23,15 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
-
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } =
-    await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const userId = userData.user.id;
-  const email = userData.user.email ?? null;
-  const emailLower = email?.toLowerCase() ?? null;
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
+  const { id: userId, email, emailLower } = authRes.user;
 
   let isSuperAdmin = false;
   if (emailLower) {
-    const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+    const admin = adminClient(envRes.env);
     const { data: saRow } = await admin
       .from("super_admins")
       .select("email, user_id")
