@@ -98,7 +98,7 @@ Deno.serve(async (req) => {
   if (saRow.user_id == null) {
     void admin
       .from("super_admins")
-      .update({ user_id: userData.user.id })
+      .update({ user_id: authRes.user.id })
       .eq("email", emailLower)
       .is("user_id", null);
   }
