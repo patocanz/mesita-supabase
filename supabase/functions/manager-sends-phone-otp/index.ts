@@ -22,6 +22,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { isEmailish } from "../_shared/input.ts";
 import { randomSixDigits, sha256Hex } from "../_shared/otp.ts";
 
 type Body = { venueId?: string; requesterEmail?: string };
@@ -74,7 +75,7 @@ Deno.serve(async (req) => {
   const venueId = (body.venueId ?? "").trim();
   const requesterEmail = (body.requesterEmail ?? "").trim().toLowerCase();
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  if (!requesterEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(requesterEmail)) {
+  if (!isEmailish(requesterEmail)) {
     return json(
       { ok: false, error: "requesterEmail must look like name@domain.tld" },
       400,

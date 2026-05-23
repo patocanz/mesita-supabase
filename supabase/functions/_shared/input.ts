@@ -10,3 +10,12 @@ export function clean(v: unknown, max = 256): string | null {
   if (!s) return null;
   return s.slice(0, max);
 }
+
+// Cheap "looks like an email" check. Same single-regex bar Supabase
+// itself uses on signup — DNS/MX validation belongs at the SMTP
+// layer, not here.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export function isEmailish(value: unknown): value is string {
+  return typeof value === "string" && EMAIL_RE.test(value);
+}

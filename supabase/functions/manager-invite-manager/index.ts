@@ -22,6 +22,7 @@ import {
   readEFEnv,
   requireOwner,
 } from "../_shared/auth.ts";
+import { isEmailish } from "../_shared/input.ts";
 import { isManagerRole, type ManagerRole } from "../_shared/roles.ts";
 import { newInviteToken } from "../_shared/tokens.ts";
 
@@ -48,7 +49,7 @@ Deno.serve(async (req) => {
   const role = body.role ?? "manager";
   const redirectBase = (body.redirectBase ?? "").trim().replace(/\/$/, "");
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+  if (!isEmailish(email)) {
     return json({ ok: false, error: "A valid email is required" }, 400);
   }
   if (!isManagerRole(role)) {

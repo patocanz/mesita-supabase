@@ -11,6 +11,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { isEmailish } from "../_shared/input.ts";
 import { VENUE_MANAGER_COLUMNS } from "../_shared/venue-columns.ts";
 
 const MAX_PHOTOS = 30;
@@ -390,7 +391,7 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: "email must be a string" }, 400);
     } else {
       const trimmed = raw.trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      if (!isEmailish(trimmed)) {
         return json({ ok: false, error: "email must look like name@domain.tld" }, 400);
       }
       if (trimmed.length > 254) {
