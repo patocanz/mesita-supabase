@@ -9,8 +9,12 @@
 // Deploy: supabase functions deploy manager-update-unit
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+} from "../_shared/auth.ts";
 import { isEmailish } from "../_shared/input.ts";
 import { VENUE_MANAGER_COLUMNS } from "../_shared/venue-columns.ts";
 
@@ -133,33 +137,17 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
+  const userId = authRes.user.id;
+  const userEmail = authRes.user.email;
 
   // Auth: any signed-in user. Super-admin elevation (skips the
   // venue_members check) is granted when the caller's email is in
   // public.super_admins.
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const userId = userData.user.id;
-  const userEmail = userData.user.email ?? null;
+  const admin = adminClient(envRes.env);
 
   // Allowlist check. Lazy-backfill user_id so future audit logs can join
   // by uuid without re-reading auth.users.
