@@ -5,7 +5,6 @@ Supabase source of truth for the Mesita project — Edge Functions, migrations, 
 ## Project
 
 - **Project ref:** `yjalywfzdelacdzccpgb`
-- **Region:** us-west-2
 - **Dashboard:** https://supabase.com/dashboard/project/yjalywfzdelacdzccpgb
 
 ## Architectural rules
@@ -18,16 +17,14 @@ Supabase source of truth for the Mesita project — Edge Functions, migrations, 
 ```
 supabase/
 ├── config.toml              # Local CLI + project config (per-function JWT settings live here)
-├── functions/               # Edge Functions (Deno)
-│   ├── hello-world/         # Public smoke test
-│   ├── places-autocomplete/ # Google Places search proxy (JWT-protected)
-│   ├── places-details/      # Google Place details proxy (JWT-protected)
-│   ├── venues-list/         # Public — guest catalog read
-│   ├── venues-create/       # Authenticated — manager creates a venue
-│   └── venues-mine/         # Authenticated — manager lists their venues
-├── migrations/              # Versioned SQL migrations
-│   └── 0001_init.sql        # Core domain: venues, managers, venue_members, guests + RLS
-└── seed.sql                 # Idempotent local seed (one test venue)
+├── functions/
+│   ├── _shared/             # Pure utilities imported by EFs (no fn-to-fn calls at runtime)
+│   ├── admin-*/             # Admin console flows (super-admin gated)
+│   ├── guest-*/             # B2C diner flows
+│   ├── manager-*/           # B2B venue manager flows
+│   └── staff-*/             # WhatsApp validator (waiter) flows
+├── migrations/              # Versioned SQL migrations (0001 … 0020)
+└── seed.sql                 # Idempotent local seed
 ```
 
 ## Common commands
@@ -36,37 +33,34 @@ supabase/
 # Link this repo to the remote project (one time per machine)
 supabase link --project-ref yjalywfzdelacdzccpgb
 
-# Apply migrations to the linked project
+# Apply pending migrations to the linked project
 supabase db push
 
-# Deploy all venue Edge Functions
-supabase functions deploy venues-list
-supabase functions deploy venues-create
-supabase functions deploy venues-mine
+# Deploy one or more Edge Functions
+supabase functions deploy <function-name> [<function-name> ...]
 
-# Generate TypeScript types for the frontend
-supabase gen types typescript --linked \
-  > ../mesita-web-platform/src/lib/supabase/database.types.ts
+# Regenerate TypeScript types for every consumer web repo + push
+./scripts/deploy.sh
 ```
 
-## Function reference
+## Edge Function families
 
-| Function | Auth | Verb | Purpose |
-|---|---|---|---|
-| `hello-world` | none | GET | Smoke test |
-| `places-autocomplete` | JWT | POST | Google Places search proxy |
-| `places-details` | JWT | POST | Google Place details by `placeId` |
-| `venues-list` | none | GET/POST | Public guest catalog (RLS-filtered to active/lead) |
-| `venues-create` | JWT | POST | Authenticated manager creates a venue + becomes owner |
-| `venues-mine` | JWT | GET/POST | Authenticated manager lists venues they belong to |
+| Prefix | Auth pool | Purpose |
+|---|---|---|
+| `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset |
+| `manager-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
+| `guest-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
+| `staff-*` | phone OTP (post-invite) | WhatsApp validator flows |
 
-All venue functions are self-contained: each verifies its own caller, validates its own input, performs its own DB work, and never calls another Edge Function.
+`_shared/` holds pure imports (HTTP/CORS helpers, env+auth wrappers, role catalog, token generator). It is **not** a runtime dependency — Supabase bundles imported source per-function at deploy time, so the "no function-to-function calls" rule is still honored.
 
-## Schema overview (`0001_init.sql`)
+## Schema highlights
 
 - **`venues`** — the catalog. Status: `lead | active | paused | archived`. Listing type: `partner | web`.
-- **`managers`** — profile bound to `auth.users`. Created on first venue write (idempotent upsert inside `venues-create`).
-- **`venue_members`** — many-to-many between managers and venues with role: `owner | manager | staff`.
-- **`guests`** — profile bound to `auth.users`. Defined but not used until the guest phone-OTP plan.
+- **`venue_members`** — managers ↔ venues with role `owner | manager | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
+- **`venue_roles`** — newer phone-pool roles (`staff | manager`) bound directly to `auth.users`.
+- **`staff_invites` / `manager_invites`** — token-based pending invitations.
+- **`tickets`** — guest tickets with status / story / reservation / cashback / discount columns.
+- **`super_admins`** — allow-list bypass for the admin console.
 
-**RLS is tight:** SELECT only for the rows a caller is permitted to see; all writes go through the service role inside Edge Functions.
+**RLS is tight:** SELECT only for rows the caller is permitted to see; all writes go through the service role inside Edge Functions.
