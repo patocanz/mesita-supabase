@@ -6,53 +6,39 @@
 // also blocked by manager-remove-member.)
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+  requireOwner,
+} from "../_shared/auth.ts";
+import { isManagerRole, type ManagerRole } from "../_shared/roles.ts";
 
 type Body = {
   memberId?: string;
-  role?: "owner" | "manager" | "viewer";
+  role?: ManagerRole;
 };
-
-const ROLE_VALUES = new Set(["owner", "manager", "viewer"]);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
-
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const callerId = userData.user.id;
-  const callerEmail = userData.user.email?.toLowerCase() ?? null;
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
 
   let body: Body = {};
   try { body = (await req.json()) as Body; } catch { /* empty */ }
   const memberId = (body.memberId ?? "").trim();
-  const role = (body.role ?? "") as Body["role"];
+  const role = body.role;
   if (!memberId) return json({ ok: false, error: "memberId is required" }, 400);
-  if (!role || !ROLE_VALUES.has(role)) {
+  if (!isManagerRole(role)) {
     return json({ ok: false, error: "role must be owner | manager | viewer" }, 400);
   }
 
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const admin = adminClient(envRes.env);
 
   const target = await admin
     .from("venue_members")
@@ -66,30 +52,14 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Member not found." }, 404);
   }
 
-  // Authorization: owner of the same venue (or super-admin).
-  let canEdit = false;
-  if (callerEmail) {
-    const { data: saRow } = await admin
-      .from("super_admins")
-      .select("email")
-      .eq("email", callerEmail)
-      .maybeSingle();
-    if (saRow) canEdit = true;
-  }
-  if (!canEdit) {
-    const { data: callerRow } = await admin
-      .from("venue_members")
-      .select("role")
-      .eq("venue_id", target.data.venue_id)
-      .eq("manager_id", callerId)
-      .maybeSingle();
-    if (callerRow?.role === "owner") canEdit = true;
-  }
-  if (!canEdit) {
-    return json({ ok: false, error: "Only owners can change roles." }, 403);
-  }
+  const owner = await requireOwner(
+    admin,
+    authRes.user,
+    target.data.venue_id,
+    "Only owners can change roles.",
+  );
+  if (!owner.ok) return owner.response;
 
-  // Last-owner guard: refuse to demote the only owner.
   if (target.data.role === "owner" && role !== "owner") {
     const { count } = await admin
       .from("venue_members")

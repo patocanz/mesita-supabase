@@ -1,6 +1,7 @@
 // Supabase Edge Function — manager-invite-manager
 //
-// Invite a colleague to the venue as owner / editor / viewer. Two paths:
+// Invite a colleague to the venue as owner / editor / viewer. Two
+// paths:
 //
 //   1. Email matches an existing managers row → link directly: insert
 //      venue_members at the requested role. No email goes out.
@@ -8,102 +9,82 @@
 //   2. Email is unknown → create a manager_invites row with a fresh
 //      token AND ask Supabase Auth to send the standard invite email
 //      (auth.admin.inviteUserByEmail). The redirect URL embeds our
-//      token so the accept page can claim the invite once the new user
-//      sets a password.
+//      token so the accept page can claim the invite once the new
+//      user sets a password.
 //
 // Caller must be an owner of the venue (super-admins pass through).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+  requireOwner,
+} from "../_shared/auth.ts";
+import { isManagerRole, type ManagerRole } from "../_shared/roles.ts";
+import { newInviteToken } from "../_shared/tokens.ts";
 
 type Body = {
   venueId?: string;
   email?: string;
-  role?: "owner" | "manager" | "viewer";
+  role?: ManagerRole;
   redirectBase?: string;
 };
-
-const ROLE_VALUES = new Set(["owner", "manager", "viewer"]);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
-
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const callerId = userData.user.id;
-  const callerEmail = userData.user.email?.toLowerCase() ?? null;
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
 
   let body: Body = {};
   try { body = (await req.json()) as Body; } catch { /* empty */ }
   const venueId = (body.venueId ?? "").trim();
   const email = (body.email ?? "").trim().toLowerCase();
-  const role = (body.role ?? "manager") as Body["role"];
+  const role = body.role ?? "manager";
   const redirectBase = (body.redirectBase ?? "").trim().replace(/\/$/, "");
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return json({ ok: false, error: "A valid email is required" }, 400);
   }
-  if (!role || !ROLE_VALUES.has(role)) {
+  if (!isManagerRole(role)) {
     return json({ ok: false, error: "role must be owner | manager | viewer" }, 400);
   }
 
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const admin = adminClient(envRes.env);
+  const owner = await requireOwner(
+    admin,
+    authRes.user,
+    venueId,
+    "Only owners can invite members.",
+  );
+  if (!owner.ok) return owner.response;
 
-  // Authorization: caller must be an owner of this venue (or super-admin).
-  let canInvite = false;
-  if (callerEmail) {
-    const { data: saRow } = await admin
-      .from("super_admins")
-      .select("email")
-      .eq("email", callerEmail)
-      .maybeSingle();
-    if (saRow) canInvite = true;
-  }
-  if (!canInvite) {
-    const { data: vmRow } = await admin
-      .from("venue_members")
-      .select("role")
+  // Already on the team? Two parallel lookups: existing managers row
+  // (drives the link-directly path), and any pending invite for the
+  // same address (so we can short-circuit with a friendly error).
+  const [existingManager, existingInvite] = await Promise.all([
+    admin.from("managers").select("id").ilike("email", email).maybeSingle(),
+    admin
+      .from("manager_invites")
+      .select("id, expires_at, claimed_at")
       .eq("venue_id", venueId)
-      .eq("manager_id", callerId)
-      .maybeSingle();
-    if (vmRow?.role === "owner") canInvite = true;
-  }
-  if (!canInvite) {
-    return json({ ok: false, error: "Only owners can invite members." }, 403);
-  }
+      .ilike("email", email)
+      .is("claimed_at", null)
+      .gt("expires_at", new Date().toISOString())
+      .maybeSingle(),
+  ]);
 
-  // Already on the team?
-  const { data: existingManager } = await admin
-    .from("managers")
-    .select("id")
-    .ilike("email", email)
-    .maybeSingle();
-  if (existingManager) {
+  if (existingManager.data) {
     const { data: existingMember } = await admin
       .from("venue_members")
       .select("id")
       .eq("venue_id", venueId)
-      .eq("manager_id", existingManager.id)
+      .eq("manager_id", existingManager.data.id)
       .maybeSingle();
     if (existingMember) {
       return json(
@@ -111,10 +92,9 @@ Deno.serve(async (req) => {
         409,
       );
     }
-    // Direct link — no email needed. The manager already has an account.
     const ins = await admin
       .from("venue_members")
-      .insert({ venue_id: venueId, manager_id: existingManager.id, role })
+      .insert({ venue_id: venueId, manager_id: existingManager.data.id, role })
       .select("id")
       .single();
     if (ins.error) {
@@ -123,25 +103,14 @@ Deno.serve(async (req) => {
     return json({ ok: true, mode: "linked", memberId: ins.data.id, email, role });
   }
 
-  // Pending invite already? Bounce so the inviter clicks "Resend" instead.
-  const { data: existingInvite } = await admin
-    .from("manager_invites")
-    .select("id, expires_at, claimed_at")
-    .eq("venue_id", venueId)
-    .ilike("email", email)
-    .is("claimed_at", null)
-    .gt("expires_at", new Date().toISOString())
-    .maybeSingle();
-  if (existingInvite) {
+  if (existingInvite.data) {
     return json(
       { ok: false, code: "invite_pending", error: "An invite for that email is already pending." },
       409,
     );
   }
 
-  // Fresh token. URL-safe base64 of 18 random bytes (same scheme as
-  // staff_invites).
-  const token = base64UrlSafe(crypto.getRandomValues(new Uint8Array(18)));
+  const token = newInviteToken();
 
   const invite = await admin
     .from("manager_invites")
@@ -150,7 +119,7 @@ Deno.serve(async (req) => {
       email,
       role,
       token,
-      created_by: callerId,
+      created_by: authRes.user.id,
     })
     .select("id, token, expires_at")
     .single();
@@ -158,10 +127,9 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: `invite_insert: ${invite.error.message}` }, 500);
   }
 
-  // Fire the Supabase invite email. Supabase Auth handles SMTP + the
-  // signed magic link. We tack the token + venueId onto the redirect
-  // so the accept page can claim the invite right after the new user
-  // sets their password.
+  // Supabase Auth handles SMTP + the signed magic link. Token + venueId
+  // travel on the redirect so the accept page can claim the invite the
+  // moment the new user sets their password.
   const redirectTo = redirectBase
     ? `${redirectBase}/accept-invite?token=${encodeURIComponent(token)}&venueId=${encodeURIComponent(venueId)}`
     : undefined;
@@ -173,8 +141,8 @@ Deno.serve(async (req) => {
       redirectTo,
     });
     if (inviteRes.error) {
-      // "User already registered" — fine, we still have the manager_invites
-      // row; they can use the link without a Supabase invite email.
+      // "User already registered" is fine: the manager_invites row is
+      // still good and the recipient can use the link directly.
       emailError = inviteRes.error.message;
     } else {
       emailSent = true;
@@ -195,9 +163,3 @@ Deno.serve(async (req) => {
     emailError,
   });
 });
-
-function base64UrlSafe(bytes: Uint8Array): string {
-  let str = "";
-  for (const b of bytes) str += String.fromCharCode(b);
-  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
