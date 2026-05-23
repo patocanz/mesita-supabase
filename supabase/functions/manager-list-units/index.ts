@@ -1,15 +1,16 @@
 // Supabase Edge Function — manager-list-units
 //
-// Authenticated. Returns every venue the caller is a member of, regardless
-// of status (so paused / archived rows are visible to the owner). Self-
-// contained: own auth check, own DB query; never calls other Edge Functions.
-//
-// Local:  supabase functions serve manager-list-units
-// Deploy: supabase functions deploy manager-list-units
+// Authenticated. Returns every venue the caller is a member of,
+// regardless of status (so paused / archived rows are visible to the
+// owner).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+} from "../_shared/auth.ts";
 import { VENUE_MANAGER_COLUMNS } from "../_shared/venue-columns.ts";
 
 Deno.serve(async (req) => {
@@ -18,38 +19,20 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!supabaseUrl || !anonKey || !serviceKey) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
 
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const userId = userData.user.id;
-
-  // Service role: we want to read regardless of venue status (paused /
-  // archived rows belong to the owner too). RLS would filter those out for
-  // the user JWT path.
-  const admin = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  // Service role: read regardless of venue status (paused / archived
+  // rows belong to the owner too). RLS would filter those out for the
+  // user JWT path.
+  const admin = adminClient(envRes.env);
 
   const { data, error } = await admin
     .from("venue_members")
     .select(`role, venue:venues(${VENUE_MANAGER_COLUMNS})`)
-    .eq("manager_id", userId)
+    .eq("manager_id", authRes.user.id)
     .order("created_at", { ascending: false });
 
   if (error) {
