@@ -17,15 +17,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { clean } from "../_shared/input.ts";
 
 type Body = { token?: string | null };
-
-function clean(v: unknown, max = 256): string | null {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  return s.slice(0, max);
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();

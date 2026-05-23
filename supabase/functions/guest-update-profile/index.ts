@@ -10,6 +10,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import { clean } from "../_shared/input.ts";
 
 type Body = {
   full_name?: string | null;
@@ -20,13 +21,6 @@ type Body = {
 };
 
 const SEX_VALUES = new Set(["male", "female", "other"]);
-
-function clean(v: unknown, max = 120): string | null {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  return s.slice(0, max);
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
