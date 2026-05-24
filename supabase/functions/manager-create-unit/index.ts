@@ -61,9 +61,9 @@ type GooglePeriod = {
 
 // Persisted shape for venues.hours (jsonb). Lowercase English day keys;
 // closed days are simply omitted. Multiple ranges per day cover split
-// shifts (lunch + dinner). Overnight ranges are clipped at 23:59 on the
-// open day and resumed at 00:00 on the close day, so each entry is a same-
-// day pair that's trivial to render.
+// shifts (lunch + dinner). Overnight ranges live on the opening day with
+// `close <= open` semantically meaning the close time is the next day —
+// a single entry per overnight shift, not a Mon-23:59 + Tue-00:00 pair.
 type WeeklyHours = Partial<Record<DayKey, { open: string; close: string }[]>>;
 type DayKey =
   | "sunday"
@@ -1450,17 +1450,12 @@ function weeklyHoursFromPeriods(periods: GooglePeriod[] | undefined): WeeklyHour
     const closeStr = hhmm(p.close.hour, p.close.minute);
     if (typeof cDay !== "number" || !closeStr) continue;
 
-    if (cDay === oDay) {
-      pushRange(out, DAY_KEYS[oDay], openStr, closeStr);
-    } else {
-      // Overnight: split into open-day 23:59 + close-day 00:00 → close.
-      // Mesita's UI shows hours per weekday, and a Friday 6pm–2am venue
-      // should appear under Friday 18:00–23:59 AND Saturday 00:00–02:00.
-      pushRange(out, DAY_KEYS[oDay], openStr, "23:59");
-      if (closeStr !== "00:00") {
-        pushRange(out, DAY_KEYS[cDay], "00:00", closeStr);
-      }
-    }
+    // Same-day or overnight — both store as one range on the opening day.
+    // For overnight, close ≤ open is the next-day-close signal the UI and
+    // any time-window math read from. Splitting at midnight is what used
+    // to make a 6pm–2am venue render as two confusing rows; one range
+    // tells the truth in one place.
+    pushRange(out, DAY_KEYS[oDay], openStr, closeStr);
   }
 
   return Object.keys(out).length > 0 ? out : null;
