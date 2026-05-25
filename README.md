@@ -21,7 +21,7 @@ supabase/
 │   ├── _shared/             # Pure utilities imported by EFs (no fn-to-fn calls at runtime)
 │   ├── admin-*/             # Admin console flows (super-admin gated)
 │   ├── guest-*/             # B2C diner flows
-│   ├── manager-*/           # B2B venue manager flows
+│   ├── business-*/           # B2B venue business flows
 │   └── staff-*/             # WhatsApp validator (waiter) flows
 ├── migrations/              # Versioned SQL migrations (0001 … 0020)
 └── seed.sql                 # Idempotent local seed
@@ -48,7 +48,7 @@ supabase functions deploy <function-name> [<function-name> ...]
 | Prefix | Auth pool | Purpose |
 |---|---|---|
 | `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset |
-| `manager-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
+| `business-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
 | `guest-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
 | `staff-*` | phone OTP (post-invite) | WhatsApp validator flows |
 
@@ -57,9 +57,9 @@ supabase functions deploy <function-name> [<function-name> ...]
 ## Schema highlights
 
 - **`venues`** — the catalog. Status: `lead | active | paused | archived`. Listing type: `partner | web`.
-- **`venue_members`** — managers ↔ venues with role `owner | manager | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
-- **`venue_roles`** — newer phone-pool roles (`staff | manager`) bound directly to `auth.users`.
-- **`staff_invites` / `manager_invites`** — token-based pending invitations.
+- **`venue_members`** — businesses ↔ venues with role `owner | business | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
+- **`venue_roles`** — newer phone-pool roles (`staff | business`) bound directly to `auth.users`.
+- **`staff_invites` / `business_invites`** — token-based pending invitations.
 - **`tickets`** — guest tickets with status / story / reservation / cashback / discount columns.
 - **`super_admins`** — allow-list bypass for the admin console.
 

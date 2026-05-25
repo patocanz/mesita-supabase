@@ -44,12 +44,12 @@ enable_refresh_token_rotation = true
 refresh_token_reuse_interval = 10
 enable_signup = true
 enable_anonymous_sign_ins = false
-# MFA — required only for admin sign-in, kept available so managers can
+# MFA — required only for admin sign-in, kept available so businesses can
 # enrol if they want. Admin-side enforcement lives in admin-signin-email.
 enable_manual_linking = false
 
 # Email — password only. No magic link, no email OTP. Guests don't get
-# email auth at all; manager + admin live here.
+# email auth at all; business + admin live here.
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
@@ -60,7 +60,7 @@ otp_length = 6
 otp_expiry = 3600
 
 # Phone — Twilio Verify, Mexico template at signup. Guests + staff sign
-# in here; managers + admins never see this provider.
+# in here; businesses + admins never see this provider.
 [auth.sms]
 enable_signup = true
 enable_confirmations = true
@@ -97,7 +97,7 @@ s3_region = "env(S3_REGION)"
 s3_access_key = "env(S3_ACCESS_KEY)"
 s3_secret_key = "env(S3_SECRET_KEY)"
 
-# Per-function overrides. Naming rule: who-verb-nouns (e.g. manager-create-unit,
+# Per-function overrides. Naming rule: who-verb-nouns (e.g. business-create-unit,
 # guest-list-tickets). All functions verify the JWT except the truly public
 # catalog reads, which rely on RLS to gate visibility instead.
 #
@@ -113,7 +113,7 @@ verify_jwt = true
 [functions.staff-accept-invite]
 verify_jwt = true
 
-[functions.manager-signin-email]
+[functions.business-signin-email]
 verify_jwt = true
 
 [functions.admin-signin-email]
@@ -160,72 +160,72 @@ verify_jwt = true
 [functions.guest-submit-story]
 verify_jwt = true
 
-# --- Manager (all authed) ---
+# --- Business (all authed) ---
 
 # Identity
-[functions.manager-get-profile]
+[functions.business-get-profile]
 verify_jwt = true
 
-[functions.manager-create-profile]
+[functions.business-create-profile]
 verify_jwt = true
 
 # Unit (venue) lifecycle
-[functions.manager-list-units]
+[functions.business-list-units]
 verify_jwt = true
 
-[functions.manager-create-unit]
+[functions.business-create-unit]
 verify_jwt = true
 
-[functions.manager-update-unit]
+[functions.business-update-unit]
 verify_jwt = true
 
 # Ownership-verification submit + status-poll, called from /add on
-# manager.mesita.ai. manager-verify-call-code is phase 2 of the
-# ai_call OTP flow (manager-submit-verification generates the code).
-[functions.manager-submit-verification]
+# business.mesita.ai. business-verify-call-code is phase 2 of the
+# ai_call OTP flow (business-submit-verification generates the code).
+[functions.business-submit-verification]
 verify_jwt = true
 
-[functions.manager-get-verification]
+[functions.business-get-verification]
 verify_jwt = true
 
-[functions.manager-verify-call-code]
+[functions.business-verify-call-code]
 verify_jwt = true
 
 # State-aware Place ID → Mesita venue lookup. Powers the /add page's
 # inline result card (not_in_mesita / web_listed_unclaimed / pending /
 # verified_partner).
-[functions.manager-lookup-venue]
+[functions.business-lookup-venue]
 verify_jwt = true
 
 # One-shot dashboard bundle: user + venues + active venue + recent tickets.
-[functions.manager-get-overview]
+[functions.business-get-overview]
 verify_jwt = true
 
 # Ticket workflow
-[functions.manager-create-ticket]
+[functions.business-create-ticket]
 verify_jwt = true
 
-[functions.manager-list-tickets]
+[functions.business-list-tickets]
 verify_jwt = true
 
-[functions.manager-mark-paid]
+[functions.business-mark-paid]
 verify_jwt = true
 
-[functions.manager-cancel-ticket]
+[functions.business-cancel-ticket]
 verify_jwt = true
 
-[functions.manager-verify-story]
+[functions.business-verify-story]
 verify_jwt = true
 
 # Guest lookup at the table (resolve 6-char code → name + balance).
-[functions.manager-find-guest]
+[functions.business-find-consumer]
 verify_jwt = true
 
 # Google Places proxies. Keep the platform key server-side.
-[functions.manager-suggest-places]
+[functions.business-suggest-places]
 verify_jwt = true
 
-[functions.manager-get-place]
+[functions.business-get-place]
 verify_jwt = true
 
 # --- Admin (Supabase Auth + super_admins allowlist) ---
@@ -240,6 +240,6 @@ verify_jwt = true
 verify_jwt = true
 
 # Resolve a Google Place ID to a Mesita venue. Powers the admin
-# console's "open in manager" link generator.
+# console's "open in business" link generator.
 [functions.admin-find-venue]
 verify_jwt = true

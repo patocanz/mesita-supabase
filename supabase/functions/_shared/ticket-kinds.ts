@@ -1,5 +1,5 @@
-// Ticket-kind taxonomy used by manager-create-ticket, manager-mark-paid,
-// and manager-verify-story. Single source of truth so a new flow added
+// Ticket-kind taxonomy used by business-create-ticket, business-mark-paid,
+// and business-verify-story. Single source of truth so a new flow added
 // to one EF can't drift from the others.
 //
 // Pure sets — no DB reads, no auth, no I/O — so importing from _shared

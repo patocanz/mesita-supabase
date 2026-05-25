@@ -55,12 +55,12 @@ Deno.serve(async (req) => {
   });
 
   // Decide the role to stamp. If the user is already promoted to staff,
-  // keep that; otherwise default to consumer. Never downgrade an admin/manager
+  // keep that; otherwise default to consumer. Never downgrade an admin/business
   // — they should never be here (different auth pools), but defence in
   // depth is cheap.
   const currentRole =
     (user.app_metadata as Record<string, unknown> | null)?.role as string | undefined;
-  const allowedKeep = new Set(["staff", "manager", "admin"]);
+  const allowedKeep = new Set(["staff", "business", "admin"]);
   const role = currentRole && allowedKeep.has(currentRole) ? currentRole : "consumer";
 
   if (role !== currentRole) {

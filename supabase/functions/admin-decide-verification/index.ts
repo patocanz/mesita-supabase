@@ -3,11 +3,11 @@
 // Super-admin approves or rejects a pending ownership verification.
 //
 //   approve  → verification.status='approved' + a venue_members row
-//              (role='owner', manager_id=requester) is inserted. The
+//              (role='owner', business_id=requester) is inserted. The
 //              venue itself is already active+web from
-//              manager-create-unit; this EF only grants membership.
+//              business-create-unit; this EF only grants membership.
 //   reject   → verification.status='rejected' with reject_reason. No
-//              membership change. The manager can submit a fresh
+//              membership change. The business can submit a fresh
 //              request from /add.
 //
 // Auth: caller's JWT email must be in public.super_admins.
@@ -116,10 +116,10 @@ Deno.serve(async (req) => {
 
   if (decision === "approved") {
     // Grant the requester ownership. The venue is already active+web;
-    // membership is what gates manager access on /unit/<id>/*.
+    // membership is what gates business access on /unit/<id>/*.
     const { error: memberError } = await admin.from("venue_members").insert({
       venue_id: verification.venue_id,
-      manager_id: verification.requester_id,
+      business_id: verification.requester_id,
       role: "owner",
     });
     if (memberError) {

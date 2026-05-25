@@ -17,7 +17,7 @@ PROJECT_REF="yjalywfzdelacdzccpgb"
 # Web repos sitting next to this one that import database.types.ts.
 # Add new consumer repos here as they appear.
 WEB_REPOS=(
-  "../mesita-web-manager"
+  "../mesita-web-business"
   "../mesita-web-guest"
   "../mesita-web-admin"
 )
