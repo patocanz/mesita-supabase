@@ -8,7 +8,7 @@
 // Auth: caller's JWT email must be in public.super_admins.
 // verify_jwt = true gates non-bearer callers at the gateway.
 //
-// Google key: `GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY` (same secret used
+// Google key: `GMP_KEY` (same secret used
 // by manager-suggest-places / manager-get-place). The key never leaves
 // Supabase — clients call this EF, this EF calls Google.
 //
@@ -104,13 +104,13 @@ Deno.serve(async (req) => {
   }
 
   // --- Google key ---
-  const googleKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
+  const googleKey = Deno.env.get("GMP_KEY");
   if (!googleKey) {
     return json({
       ok: false,
       code: "server_missing_google_key",
       error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY.",
+        "Mesita backend isn't configured for Google Places. Tell support — they need to set GMP_KEY.",
     });
   }
 

@@ -117,10 +117,10 @@ Deno.serve(async (req) => {
   // Third-party secrets follow the `<VENDOR>_SUPABASE_API_KEY` convention
   // (server-only, stored in Supabase secrets). Browser-bound keys use
   // `NEXT_PUBLIC_<VENDOR>_BROWSER_KEY` and live on Vercel.
-  const GOOGLE_KEY = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
-  const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_SUPABASE_API_KEY");
-  const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_SUPABASE_API_KEY");
-  const OPENAI_KEY = Deno.env.get("OPENAI_SUPABASE_API_KEY");
+  const GOOGLE_KEY = Deno.env.get("GMP_KEY");
+  const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
+  const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
+  const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
   // Google Custom Search (image search) for venue marketing-grade photos.
   // Independent of Google Maps Platform: it needs its own API key + a
   // Programmable Search Engine ID configured to "search the entire web"
@@ -1124,7 +1124,7 @@ type SynthOutput = {
 };
 
 async function synthesiseVenue(input: SynthInput, apiKey: string | undefined): Promise<SynthOutput> {
-  if (!apiKey) return synthFallback(input, "no OPENAI_SUPABASE_API_KEY");
+  if (!apiKey) return synthFallback(input, "no OPENAI_KEY");
 
   const prompt = [
     "You are normalising a venue for the Mesita catalog. Output STRICT JSON only, no markdown.",
