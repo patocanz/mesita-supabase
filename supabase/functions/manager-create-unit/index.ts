@@ -117,7 +117,7 @@ Deno.serve(async (req) => {
   // Third-party secrets follow the `<VENDOR>_SUPABASE_API_KEY` convention
   // (server-only, stored in Supabase secrets). Browser-bound keys use
   // `NEXT_PUBLIC_<VENDOR>_BROWSER_KEY` and live on Vercel.
-  const GOOGLE_KEY = Deno.env.get("VERCEL_GMP_KEY");
+  const GOOGLE_KEY = Deno.env.get("SUPABASE_GMP_KEY");
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
   const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
