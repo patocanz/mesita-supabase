@@ -1,16 +1,16 @@
-// Supabase Edge Function — guest-signin-phone
+// Supabase Edge Function — consumer-signin-phone
 //
-// Post-sign-in housekeeping for the phone-OTP guest flow. The Supabase
+// Post-sign-in housekeeping for the phone-OTP consumer flow. The Supabase
 // Auth call (signInWithOtp + verifyOtp) already landed a session before
 // the client calls this function. Our job is to:
 //
-//   1. Stamp app_metadata.role = 'guest' on first sign-in (don't clobber
+//   1. Stamp app_metadata.role = 'consumer' on first sign-in (don't clobber
 //      if the user is already a staff member of some venue).
-//   2. Lazy-create the guests row with a unique 6-char code, mirroring
-//      auth.user.phone into guests.phone.
+//   2. Lazy-create the consumers row with a unique 6-char code, mirroring
+//      auth.user.phone into consumers.phone.
 //
 // Safe to call on every sign-in (idempotent). Returns the current role +
-// guest row so the client can refresh its session and route accordingly.
+// consumer row so the client can refresh its session and route accordingly.
 //
 // Self-contained: own JWT verification, own DB writes via the service role.
 
@@ -44,10 +44,10 @@ Deno.serve(async (req) => {
   }
   const user = userData.user;
 
-  // Phone is required for guest sign-in. If the session was opened via
-  // some other provider, reject — guest auth is phone-only.
+  // Phone is required for consumer sign-in. If the session was opened via
+  // some other provider, reject — consumer auth is phone-only.
   if (!user.phone) {
-    return json({ ok: false, error: "Guest sign-in requires a phone session." }, 400);
+    return json({ ok: false, error: "Consumer sign-in requires a phone session." }, 400);
   }
 
   const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
@@ -55,13 +55,13 @@ Deno.serve(async (req) => {
   });
 
   // Decide the role to stamp. If the user is already promoted to staff,
-  // keep that; otherwise default to guest. Never downgrade an admin/manager
+  // keep that; otherwise default to consumer. Never downgrade an admin/manager
   // — they should never be here (different auth pools), but defence in
   // depth is cheap.
   const currentRole =
     (user.app_metadata as Record<string, unknown> | null)?.role as string | undefined;
   const allowedKeep = new Set(["staff", "manager", "admin"]);
-  const role = currentRole && allowedKeep.has(currentRole) ? currentRole : "guest";
+  const role = currentRole && allowedKeep.has(currentRole) ? currentRole : "consumer";
 
   if (role !== currentRole) {
     const stamp = await admin.auth.admin.updateUserById(user.id, {
@@ -72,26 +72,26 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Lazy-create guests row. Race: two parallel sign-ins on a brand-new
+  // Lazy-create consumers row. Race: two parallel sign-ins on a brand-new
   // account can both insert — handle 23505 by reading the row back.
   const existing = await admin
-    .from("guests")
+    .from("consumers")
     .select("id, code, full_name, phone")
     .eq("id", user.id)
     .maybeSingle();
   if (existing.error) {
-    return json({ ok: false, error: `guest_read: ${existing.error.message}` }, 500);
+    return json({ ok: false, error: `consumer_read: ${existing.error.message}` }, 500);
   }
 
-  let guestRow = existing.data;
-  if (!guestRow) {
+  let consumerRow = existing.data;
+  if (!consumerRow) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const codeResult = await admin.rpc("generate_guest_code");
+      const codeResult = await admin.rpc("generate_consumer_code");
       if (codeResult.error) {
         return json({ ok: false, error: `code_gen: ${codeResult.error.message}` }, 500);
       }
       const inserted = await admin
-        .from("guests")
+        .from("consumers")
         .insert({
           id: user.id,
           code: codeResult.data as string,
@@ -100,44 +100,44 @@ Deno.serve(async (req) => {
         .select("id, code, full_name, phone")
         .single();
       if (!inserted.error) {
-        guestRow = inserted.data;
+        consumerRow = inserted.data;
         break;
       }
       if (inserted.error.code !== "23505") {
-        return json({ ok: false, error: `guest_create: ${inserted.error.message}` }, 500);
+        return json({ ok: false, error: `consumer_create: ${inserted.error.message}` }, 500);
       }
       // Conflict — someone else inserted concurrently. Read it back.
       const refetch = await admin
-        .from("guests")
+        .from("consumers")
         .select("id, code, full_name, phone")
         .eq("id", user.id)
         .maybeSingle();
       if (refetch.data) {
-        guestRow = refetch.data;
+        consumerRow = refetch.data;
         break;
       }
     }
-  } else if (guestRow.phone !== user.phone) {
+  } else if (consumerRow.phone !== user.phone) {
     // Phone drifted (rare — admin manually changed auth.users.phone).
     // Re-sync.
     const sync = await admin
-      .from("guests")
+      .from("consumers")
       .update({ phone: user.phone })
       .eq("id", user.id)
       .select("id, code, full_name, phone")
       .single();
     if (sync.error) {
-      return json({ ok: false, error: `guest_phone_sync: ${sync.error.message}` }, 500);
+      return json({ ok: false, error: `consumer_phone_sync: ${sync.error.message}` }, 500);
     }
-    guestRow = sync.data;
+    consumerRow = sync.data;
   }
 
   return new Response(
     JSON.stringify({
       ok: true,
       role,
-      guest: guestRow,
-      onboarded: !!guestRow?.full_name,
+      consumer: consumerRow,
+      onboarded: !!consumerRow?.full_name,
     }),
     { status: 200, headers: { ...CORS, "Content-Type": "application/json" } },
   );

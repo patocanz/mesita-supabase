@@ -1,6 +1,6 @@
-// Supabase Edge Function — guest-submit-story
+// Supabase Edge Function — consumer-submit-story
 //
-// Authenticated. The guest uploads the URL of their Instagram-story
+// Authenticated. The consumer uploads the URL of their Instagram-story
 // screenshot for a story-required ticket. Sets story_status to
 // 'submitted' and records the screenshot URL + timestamp, so the AI
 // verifier (or waiter fallback) can pick it up.
@@ -12,8 +12,8 @@
 //   - Anything that ends up 'ai_rejected' falls to the waiter via
 //     manager-verify-story.
 //
-// Auth model: the caller must be the ticket's guest. The validator does
-// NOT submit on the guest's behalf — that's the whole point of the proof.
+// Auth model: the caller must be the ticket's consumer. The validator does
+// NOT submit on the consumer's behalf — that's the whole point of the proof.
 //
 // Self-contained: own auth, own DB writes via service role.
 
@@ -68,7 +68,7 @@ Deno.serve(async (req) => {
 
   const ticketRow = await admin
     .from("tickets")
-    .select("id, guest_id, kind, story_status")
+    .select("id, consumer_id, kind, story_status")
     .eq("id", ticketId)
     .maybeSingle();
   if (ticketRow.error) {
@@ -80,9 +80,9 @@ Deno.serve(async (req) => {
   if (!ticketRow.data) return json({ ok: false, error: "Ticket not found" }, 404);
   const ticket = ticketRow.data;
 
-  if (ticket.guest_id !== userId) {
+  if (ticket.consumer_id !== userId) {
     return json(
-      { ok: false, error: "Only the ticket's guest can submit a story." },
+      { ok: false, error: "Only the ticket's consumer can submit a story." },
       403,
     );
   }

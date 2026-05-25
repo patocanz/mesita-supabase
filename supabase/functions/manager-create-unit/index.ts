@@ -1225,7 +1225,7 @@ function synthFallback(input: SynthInput, reason: string): SynthOutput {
 // proxy for quality at best — within each source, a hero shot and a
 // blurry phone snap have the same rank. This pass asks gpt-4o-mini to
 // look at every candidate and score it on what Mesita actually needs:
-// a swipe-card cover image that makes a guest stop scrolling.
+// a swipe-card cover image that makes a consumer stop scrolling.
 //
 // One multi-image vision call. Low detail (~85 tokens / image) is fine
 // because we're judging composition + vibe, not reading menus. 20 images
@@ -1264,7 +1264,7 @@ async function rankPhotosWithVision(
     "tied to a specific date, holiday, or limited campaign is actively " +
     "harmful and must be rejected. Score each image 0-100 on conversion " +
     "potential. THE COVER (top-ranked photo) MUST SHOW THE PLACE ITSELF, " +
-    "NOT FOOD. A guest swiping should first see where they're going — the " +
+    "NOT FOOD. A consumer swiping should first see where they're going — the " +
     "dining room, the bar, the patio, the rooftop, the storefront, the " +
     "architectural detail — so they can picture being there. Cap food " +
     "photos at 85 unless every space photo on offer is unusable (blurry, " +

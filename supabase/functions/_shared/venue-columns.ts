@@ -1,10 +1,10 @@
 // Single source of truth for the columns we SELECT off public.venues.
 //
 // Before this file existed, every EF that read venues maintained its own
-// hand-typed VENUE_COLUMNS string and they drifted: guest EFs were missing
+// hand-typed VENUE_COLUMNS string and they drifted: consumer EFs were missing
 // the columns added by the Place redesign (timezone, hours, description,
 // menu_pdf_url, tags, whatsapp_pr_urls, instagram_pr_urls, the signal
-// fields, etc.), so guests literally couldn't see what managers had just
+// fields, etc.), so consumers literally couldn't see what managers had just
 // edited. Importing from here keeps every read in lock-step.
 //
 // If you add a column to venues, update this file once and every reader
@@ -29,7 +29,7 @@ const COLUMNS: readonly string[] = [
   "hours",
   "phone",
   // Legacy text fields. Description superseded them on the redesigned
-  // Place page, but other callers and the old guest Info view still read
+  // Place page, but other callers and the old consumer Info view still read
   // pitch / story so we keep them in the projection.
   "pitch",
   "story",
@@ -61,7 +61,7 @@ const COLUMNS: readonly string[] = [
   "whatsapp_pr_urls",
   "instagram_pr_urls",
   // Read-only signal columns — populated by enrichment, never by the
-  // manager. Shown on the Place page's Signals section and on guest
+  // manager. Shown on the Place page's Signals section and on consumer
   // surfaces that compare venues.
   "google_stars_overall",
   "google_review_count",
@@ -81,8 +81,8 @@ const COLUMNS: readonly string[] = [
   "created_at",
 ];
 
-// Guest reads — used by every public/guest-facing EF. No `updated_at`
-// because guests don't need to see when the manager last touched a row.
+// Consumer reads — used by every public/consumer-facing EF. No `updated_at`
+// because consumers don't need to see when the manager last touched a row.
 export const VENUE_PUBLIC_COLUMNS = COLUMNS.join(", ");
 
 // Manager reads — includes `updated_at` so the manager UI can show

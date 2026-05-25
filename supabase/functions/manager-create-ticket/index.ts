@@ -1,15 +1,15 @@
 // Supabase Edge Function — manager-create-ticket
 //
-// Authenticated. The waiter / validator opens a ticket against a guest at
+// Authenticated. The waiter / validator opens a ticket against a consumer at
 // their venue. The body specifies which of the 10 ticket flows is being
 // run (`kind`). The function does these things:
 //
 //   1. Verifies the caller's JWT and venue membership.
-//   2. Loads the venue + guest, validates input.
+//   2. Loads the venue + consumer, validates input.
 //   3. Branches by the venue's fiscal_type:
 //        - formal  → cashback flows. Inserts ticket as `pending_pay`,
 //                    snapshots cashback_percent, computes earn at gross,
-//                    accepts an optional redeem against the guest balance.
+//                    accepts an optional redeem against the consumer balance.
 //        - informal → discount flows. Inserts ticket as `revealed`,
 //                    snapshots discount_percent + cents, no Stripe rail,
 //                    no balance touched.
@@ -39,7 +39,7 @@ import {
 
 type Body = {
   venueId?: string;
-  guestCode?: string;
+  consumerCode?: string;
   kind?: string;
   checkSubtotalCents?: number;
   tipCents?: number;
@@ -71,11 +71,11 @@ Deno.serve(async (req) => {
   }
 
   const venueId = (body.venueId ?? "").toString().trim();
-  const guestCode = (body.guestCode ?? "").toString().trim().toUpperCase();
+  const consumerCode = (body.consumerCode ?? "").toString().trim().toUpperCase();
   const kind = (body.kind ?? "p_c").toString().trim();
 
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
-  if (!guestCode) return json({ ok: false, error: "guestCode is required" }, 400);
+  if (!consumerCode) return json({ ok: false, error: "consumerCode is required" }, 400);
   if (!ACTIONABLE_KINDS.has(kind)) {
     return json(
       { ok: false, error: `Unsupported ticket kind: ${kind}` },
@@ -178,23 +178,23 @@ Deno.serve(async (req) => {
 
   const ratePercent = Math.max(0, Math.min(100, venue.cashback_percent ?? 0));
 
-  // ── Guest lookup ──────────────────────────────────────────────────────
-  const guestRow = await admin
-    .from("guests")
+  // ── Consumer lookup ──────────────────────────────────────────────────────
+  const consumerRow = await admin
+    .from("consumers")
     .select("id, code, full_name, cashback_balance_cents")
-    .eq("code", guestCode)
+    .eq("code", consumerCode)
     .maybeSingle();
-  if (guestRow.error) {
+  if (consumerRow.error) {
     return json(
-      { ok: false, error: `guest_lookup: ${guestRow.error.message}` },
+      { ok: false, error: `consumer_lookup: ${consumerRow.error.message}` },
       500,
     );
   }
-  if (!guestRow.data) {
-    return json({ ok: false, error: `No guest with code ${guestCode}` }, 404);
+  if (!consumerRow.data) {
+    return json({ ok: false, error: `No consumer with code ${consumerCode}` }, 404);
   }
-  const guestId = guestRow.data.id;
-  const guestBalance = guestRow.data.cashback_balance_cents ?? 0;
+  const consumerId = consumerRow.data.id;
+  const consumerBalance = consumerRow.data.cashback_balance_cents ?? 0;
 
   const total = subtotal + tip;
 
@@ -208,12 +208,12 @@ Deno.serve(async (req) => {
   let discountPercent: number | null = null;
 
   if (isFormal) {
-    if (redeemRequested > guestBalance) {
+    if (redeemRequested > consumerBalance) {
       return json(
         {
           ok: false,
           code: "redeem_exceeds_balance",
-          error: `Guest balance is ${guestBalance} cents — can't redeem ${redeemRequested}.`,
+          error: `Consumer balance is ${consumerBalance} cents — can't redeem ${redeemRequested}.`,
         },
         400,
       );
@@ -235,20 +235,20 @@ Deno.serve(async (req) => {
     discountCents = Math.floor((total * ratePercent) / 100);
     if (discountCents > total) discountCents = total;
     // Balance is now portable across fiscal types. At an Informal venue
-    // the guest's cashback balance is applied on top of the discount:
+    // the consumer's cashback balance is applied on top of the discount:
     // billAfterDiscount = total - discountCents
-    // redeem = min(guest balance, billAfterDiscount)
-    // The cash the guest hands the waiter = billAfterDiscount - redeem.
+    // redeem = min(consumer balance, billAfterDiscount)
+    // The cash the consumer hands the waiter = billAfterDiscount - redeem.
     // Mesita is on the hook to pay the venue the `redeem` portion out of
     // its float (tracked as a redeem ledger row scoped to this venue).
     const billAfterDiscount = total - discountCents;
-    const cap = Math.min(guestBalance, billAfterDiscount);
-    if (redeemRequested > guestBalance) {
+    const cap = Math.min(consumerBalance, billAfterDiscount);
+    if (redeemRequested > consumerBalance) {
       return json(
         {
           ok: false,
           code: "redeem_exceeds_balance",
-          error: `Guest balance is ${guestBalance} cents — can't redeem ${redeemRequested}.`,
+          error: `Consumer balance is ${consumerBalance} cents — can't redeem ${redeemRequested}.`,
         },
         400,
       );
@@ -264,7 +264,7 @@ Deno.serve(async (req) => {
       );
     }
     // If the caller didn't request a specific redemption, default to the
-    // full available cap — this is the "auto-applies" promise the guest
+    // full available cap — this is the "auto-applies" promise the consumer
     // app makes on /qr ("Auto-applies to your next bill at any partner").
     redeemCents = redeemRequested > 0 ? redeemRequested : cap;
   }
@@ -321,13 +321,13 @@ Deno.serve(async (req) => {
     // If the reservation was already confirmed by the venue before checkout
     // (rare today; common once the AI agent is live) the caller can pass
     // reservationStatus too. For now we always seed 'confirmed' since the
-    // ticket is being opened *at* the table — the guest is here, the
+    // ticket is being opened *at* the table — the consumer is here, the
     // reservation succeeded.
     reservationStatus = "confirmed";
   }
 
   // ── Lifecycle status at insert time ───────────────────────────────────
-  // Formal:   ticket opens as `pending_pay` — guest still needs to pay.
+  // Formal:   ticket opens as `pending_pay` — consumer still needs to pay.
   // Informal: ticket opens as `revealed` — discount has been shown to the
   //           waiter and is being applied at the bill right now. The cash
   //           settles off-rail; Mesita's involvement at the payment step
@@ -340,7 +340,7 @@ Deno.serve(async (req) => {
     .from("tickets")
     .insert({
       venue_id: venueId,
-      guest_id: guestId,
+      consumer_id: consumerId,
       opened_by: validatorId,
       kind,
       status,
@@ -374,13 +374,13 @@ Deno.serve(async (req) => {
   // ── Informal: apply redemption immediately ────────────────────────────
   // Informal tickets settle off-rail (status goes straight to 'revealed'
   // and there's no manager-mark-paid step). If we captured a redemption,
-  // we have to debit the guest balance and write the ledger row right
+  // we have to debit the consumer balance and write the ledger row right
   // now — otherwise the credit never lands on the venue side. Formal
   // tickets keep deferring this to manager-mark-paid.
   if (!isFormal && redeemCents > 0) {
-    const newBalance = guestBalance - redeemCents;
+    const newBalance = consumerBalance - redeemCents;
     const ledger = await admin.from("cashback_ledger").insert({
-      guest_id: guestId,
+      consumer_id: consumerId,
       ticket_id: insert.data.id,
       venue_id: venueId,
       delta_cents: -redeemCents,
@@ -393,9 +393,9 @@ Deno.serve(async (req) => {
       console.error("[manager-create-ticket] informal_redeem_ledger:", ledger.error);
     }
     const balanceUpdate = await admin
-      .from("guests")
+      .from("consumers")
       .update({ cashback_balance_cents: newBalance })
-      .eq("id", guestId);
+      .eq("id", consumerId);
     if (balanceUpdate.error) {
       console.error(
         "[manager-create-ticket] informal_redeem_balance:",
@@ -413,10 +413,10 @@ Deno.serve(async (req) => {
         name: venue.name,
         fiscal_type: venue.fiscal_type,
       },
-      guest: {
-        id: guestId,
-        code: guestRow.data.code,
-        full_name: guestRow.data.full_name,
+      consumer: {
+        id: consumerId,
+        code: consumerRow.data.code,
+        full_name: consumerRow.data.full_name,
       },
     },
     201,

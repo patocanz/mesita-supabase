@@ -1,6 +1,6 @@
-// Supabase Edge Function — guest-list-tickets
+// Supabase Edge Function — consumer-list-tickets
 //
-// Authenticated. Returns the caller's tickets (guest perspective), most
+// Authenticated. Returns the caller's tickets (consumer perspective), most
 // recent first, with the venue name joined for display. Self-contained:
 // own JWT verification, own DB read; never calls another Edge Function.
 
@@ -46,7 +46,7 @@ Deno.serve(async (req) => {
     .select(
       "id, kind, status, story_status, story_screenshot_url, story_submitted_at, story_verified_at, story_reject_reason, check_subtotal_cents, tip_cents, total_cents, cashback_percent, cashback_cents, redeem_cents, discount_percent, discount_cents, revealed_at, reservation_status, reservation_at, reservation_party_size, currency, created_at, paid_at, cancelled_at, venue:venues(id, name, slug, photos, fiscal_type)",
     )
-    .eq("guest_id", userId)
+    .eq("consumer_id", userId)
     .order("created_at", { ascending: false })
     .limit(limit);
 

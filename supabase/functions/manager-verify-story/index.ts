@@ -1,7 +1,7 @@
 // Supabase Edge Function — manager-verify-story
 //
 // Authenticated. The waiter (or AI-fallback escalation) approves or rejects
-// a guest's Instagram-story screenshot.
+// a consumer's Instagram-story screenshot.
 //
 // Inputs:
 //   ticketId    — uuid of the ticket
@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
   const ticketRow = await admin
     .from("tickets")
     .select(
-      "id, venue_id, guest_id, kind, status, story_status, cashback_cents, redeem_cents",
+      "id, venue_id, consumer_id, kind, status, story_status, cashback_cents, redeem_cents",
     )
     .eq("id", ticketId)
     .maybeSingle();
@@ -177,7 +177,7 @@ Deno.serve(async (req) => {
       ticket: updated.data,
       cashbackCreditedCents: 0,
       cashbackRedeemedCents: 0,
-      guestBalanceAfterCents: null,
+      consumerBalanceAfterCents: null,
     });
   }
 
@@ -189,7 +189,7 @@ Deno.serve(async (req) => {
       ticket: updated.data,
       cashbackCreditedCents: 0,
       cashbackRedeemedCents: 0,
-      guestBalanceAfterCents: null,
+      consumerBalanceAfterCents: null,
     });
   }
   if (decision === "reject") {
@@ -200,7 +200,7 @@ Deno.serve(async (req) => {
       ticket: updated.data,
       cashbackCreditedCents: 0,
       cashbackRedeemedCents: 0,
-      guestBalanceAfterCents: null,
+      consumerBalanceAfterCents: null,
     });
   }
 
@@ -208,18 +208,18 @@ Deno.serve(async (req) => {
   const cashbackCents = ticket.cashback_cents ?? 0;
   const redeemCents = ticket.redeem_cents ?? 0;
 
-  const guestRow = await admin
-    .from("guests")
+  const consumerRow = await admin
+    .from("consumers")
     .select("cashback_balance_cents")
-    .eq("id", ticket.guest_id)
+    .eq("id", ticket.consumer_id)
     .single();
-  if (guestRow.error) {
+  if (consumerRow.error) {
     return json(
-      { ok: false, error: `guest_balance_read: ${guestRow.error.message}` },
+      { ok: false, error: `consumer_balance_read: ${consumerRow.error.message}` },
       500,
     );
   }
-  let balance = guestRow.data.cashback_balance_cents ?? 0;
+  let balance = consumerRow.data.cashback_balance_cents ?? 0;
 
   if (redeemCents > 0) {
     if (redeemCents > balance) {
@@ -227,14 +227,14 @@ Deno.serve(async (req) => {
         {
           ok: false,
           code: "redeem_exceeds_balance",
-          error: `Guest balance is below the ${redeemCents} cents this ticket would redeem.`,
+          error: `Consumer balance is below the ${redeemCents} cents this ticket would redeem.`,
         },
         409,
       );
     }
     balance -= redeemCents;
     const debit = await admin.from("cashback_ledger").insert({
-      guest_id: ticket.guest_id,
+      consumer_id: ticket.consumer_id,
       ticket_id: ticket.id,
       venue_id: ticket.venue_id,
       delta_cents: -redeemCents,
@@ -252,7 +252,7 @@ Deno.serve(async (req) => {
   if (cashbackCents > 0) {
     balance += cashbackCents;
     const credit = await admin.from("cashback_ledger").insert({
-      guest_id: ticket.guest_id,
+      consumer_id: ticket.consumer_id,
       ticket_id: ticket.id,
       venue_id: ticket.venue_id,
       delta_cents: cashbackCents,
@@ -269,14 +269,14 @@ Deno.serve(async (req) => {
 
   if (redeemCents > 0 || cashbackCents > 0) {
     const balanceUpdate = await admin
-      .from("guests")
+      .from("consumers")
       .update({ cashback_balance_cents: balance })
-      .eq("id", ticket.guest_id);
+      .eq("id", ticket.consumer_id);
     if (balanceUpdate.error) {
       return json(
         {
           ok: false,
-          error: `guest_balance_write: ${balanceUpdate.error.message}`,
+          error: `consumer_balance_write: ${balanceUpdate.error.message}`,
         },
         500,
       );
@@ -288,6 +288,6 @@ Deno.serve(async (req) => {
     ticket: updated.data,
     cashbackCreditedCents: cashbackCents,
     cashbackRedeemedCents: redeemCents,
-    guestBalanceAfterCents: balance,
+    consumerBalanceAfterCents: balance,
   });
 });
