@@ -67,7 +67,10 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("SUPABASE_GMP_KEY");
+  // Prefer the new SUPABASE_GMP_KEY name; fall back to the legacy GMP_KEY
+  // so deployments work during the secret rename in the Supabase dashboard.
+  const apiKey =
+    Deno.env.get("SUPABASE_GMP_KEY") ?? Deno.env.get("GMP_KEY");
   if (!apiKey) {
     return json({
       ok: false,
