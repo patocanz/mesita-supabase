@@ -18,6 +18,7 @@ import {
   adminClient,
   getAuthedUser,
   readEFEnv,
+  requireSuperAdmin,
 } from "../_shared/auth.ts";
 
 type Body = {
@@ -37,22 +38,10 @@ Deno.serve(async (req) => {
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
   const userId = authRes.user.id;
-  const emailLower = authRes.user.emailLower;
-  if (!emailLower) {
-    return json({ ok: false, error: "No email on session" }, 401);
-  }
 
   const admin = adminClient(envRes.env);
-
-  // super_admins gate.
-  const { data: saRow } = await admin
-    .from("super_admins")
-    .select("email")
-    .eq("email", emailLower)
-    .maybeSingle();
-  if (!saRow) {
-    return json({ ok: false, error: "Not a super-admin" }, 403);
-  }
+  const saRes = await requireSuperAdmin(admin, authRes.user);
+  if (!saRes.ok) return saRes.response;
 
   // Body.
   let body: Body = {};

@@ -22,7 +22,7 @@ import {
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
-import { sha256Hex } from "../_shared/otp.ts";
+import { redeemOtpVerification } from "../_shared/otp.ts";
 
 type Body = { verificationId?: string; code?: string };
 
@@ -49,139 +49,13 @@ Deno.serve(async (req) => {
   if (!verificationId) {
     return json({ ok: false, error: "verificationId is required" }, 400);
   }
-  if (!/^\d{6}$/.test(code)) {
-    return json({ ok: false, error: "code must be 6 digits" }, 400);
-  }
 
-  const admin = adminClient(envRes.env);
-
-  const { data: verification, error: lookupError } = await admin
-    .from("venue_verifications")
-    .select("id, venue_id, requester_id, method, payload, status")
-    .eq("id", verificationId)
-    .maybeSingle();
-  if (lookupError) {
-    return json(
-      { ok: false, error: `verification_lookup: ${lookupError.message}` },
-      500,
-    );
-  }
-  if (!verification) {
-    return json({ ok: false, error: "Verification not found" }, 404);
-  }
-  if (verification.requester_id !== userId) {
-    return json(
-      { ok: false, error: "This verification belongs to another operator" },
-      403,
-    );
-  }
-  if (verification.method !== "ai_email") {
-    return json(
-      { ok: false, error: "Code verification only applies to ai_email requests" },
-      400,
-    );
-  }
-  if (verification.status !== "pending") {
-    return json(
-      {
-        ok: false,
-        code: "already_decided",
-        error: `Verification is already ${verification.status}.`,
-      },
-      409,
-    );
-  }
-
-  const storedHash =
-    typeof (verification.payload as Record<string, unknown>).codeHash === "string"
-      ? ((verification.payload as Record<string, string>).codeHash as string)
-      : null;
-  if (!storedHash) {
-    return json(
-      { ok: false, error: "This request has no code to verify against" },
-      500,
-    );
-  }
-
-  const inputHash = await sha256Hex(code);
-  if (inputHash !== storedHash) {
-    return json(
-      { ok: false, code: "wrong_code", error: "That code didn't match." },
-      400,
-    );
-  }
-
-  const { data: settings } = await admin
-    .from("app_settings")
-    .select("auto_verify_ai_email")
-    .eq("id", 1)
-    .maybeSingle();
-  const autoVerify = settings?.auto_verify_ai_email !== false;
-  const now = new Date().toISOString();
-
-  if (!autoVerify) {
-    const nextPayload = {
-      ...(verification.payload as Record<string, unknown>),
-      codeVerifiedAt: now,
-    };
-    const { error: payloadError } = await admin
-      .from("venue_verifications")
-      .update({ payload: nextPayload })
-      .eq("id", verificationId);
-    if (payloadError) {
-      return json(
-        { ok: false, error: `verification_update: ${payloadError.message}` },
-        500,
-      );
-    }
-    return json({
-      ok: true,
-      venueId: verification.venue_id,
-      awaitingAdmin: true,
-    });
-  }
-
-  const { error: updateError } = await admin
-    .from("venue_verifications")
-    .update({
-      status: "approved",
-      decided_at: now,
-      decided_by: userId,
-      decided_via: "auto",
-    })
-    .eq("id", verificationId);
-  if (updateError) {
-    return json(
-      { ok: false, error: `verification_update: ${updateError.message}` },
-      500,
-    );
-  }
-
-  const { error: memberError } = await admin.from("venue_members").insert({
-    venue_id: verification.venue_id,
-    manager_id: userId,
-    role: "owner",
-  });
-  if (memberError) {
-    await admin
-      .from("venue_verifications")
-      .update({
-        status: "pending",
-        decided_at: null,
-        decided_by: null,
-        decided_via: null,
-      })
-      .eq("id", verificationId);
-    return json(
-      { ok: false, error: `ownership_grant: ${memberError.message}` },
-      500,
-    );
-  }
-
-  return json({
-    ok: true,
-    venueId: verification.venue_id,
-    awaitingAdmin: false,
+  return redeemOtpVerification(adminClient(envRes.env), {
+    verificationId,
+    code,
+    userId,
+    methodFilter: "ai_email",
+    autoVerifyColumn: "auto_verify_ai_email",
   });
 });
 

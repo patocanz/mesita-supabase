@@ -13,7 +13,11 @@
 // eliminate. Each helper returns a tagged result so the EF can early
 // return with a typed Response, no thrown exceptions.
 
-import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
+import {
+  createClient,
+  type SupabaseClient,
+  type User,
+} from "jsr:@supabase/supabase-js@2";
 import { json } from "./http.ts";
 
 // ─── Env ────────────────────────────────────────────────────────────
@@ -47,7 +51,10 @@ export type AuthedUser = {
   emailLower: string | null;
   phone: string | null;
   appRole: string | null;
-  raw: Awaited<ReturnType<SupabaseClient["auth"]["getUser"]>>["data"]["user"];
+  // The underlying Supabase user object — never null on the success
+  // path because getAuthedUser bails before returning if data.user is
+  // missing.
+  raw: User;
 };
 
 export async function getAuthedUser(
@@ -138,6 +145,61 @@ export async function checkMembership(
     isSuperAdmin: !!sa.data,
     role,
   };
+}
+
+// Resolves the super-admin allowlist row for the caller, lazy-backfilling
+// user_id so future audit logs can join by uuid without re-reading
+// auth.users. Returns `null` if the caller isn't on the list.
+//
+// Pattern moved out of 12+ admin EFs that each reimplemented the same
+// lookup + lazy backfill. Callers that need a hard 403 should use
+// `requireSuperAdmin` below; callers that want to render a soft "you're
+// not on the list" state (admin-whoami, manager-get-overview) should
+// call this directly and inspect the boolean.
+export async function checkSuperAdmin(
+  admin: SupabaseClient,
+  user: AuthedUser,
+): Promise<boolean> {
+  if (!user.emailLower) return false;
+  const { data: saRow } = await admin
+    .from("super_admins")
+    .select("email, user_id")
+    .eq("email", user.emailLower)
+    .maybeSingle();
+  if (!saRow) return false;
+  if (saRow.user_id == null) {
+    // Fire-and-forget; the next call picks up the backfilled uuid.
+    void admin
+      .from("super_admins")
+      .update({ user_id: user.id })
+      .eq("email", user.emailLower)
+      .is("user_id", null);
+  }
+  return true;
+}
+
+// 403s unless the caller's email is in `public.super_admins`. The 401
+// for "no email on session" stays explicit because every admin EF wants
+// to distinguish "I don't know who you are" from "I know but you can't".
+export async function requireSuperAdmin(
+  admin: SupabaseClient,
+  user: AuthedUser,
+  errorMessage = "Not a super-admin",
+): Promise<{ ok: true } | { ok: false; response: Response }> {
+  if (!user.emailLower) {
+    return {
+      ok: false,
+      response: json({ ok: false, error: "No email on session" }, 401),
+    };
+  }
+  const ok = await checkSuperAdmin(admin, user);
+  if (!ok) {
+    return {
+      ok: false,
+      response: json({ ok: false, error: errorMessage }, 403),
+    };
+  }
+  return { ok: true };
 }
 
 // Convenience: 403s if the caller has no membership at all (and isn't

@@ -20,6 +20,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
 import {
   adminClient,
+  checkSuperAdmin,
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
@@ -80,27 +81,14 @@ Deno.serve(async (req) => {
   if (!envRes.ok) return envRes.response;
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
-  const emailLower = authRes.user.emailLower;
-  if (!emailLower) {
-    return json({ ok: false, code: "unauthorized", error: "No email on session" });
-  }
   const admin = adminClient(envRes.env);
 
   // --- Auth: super_admins allowlist via JWT ---
-  const { data: saRow } = await admin
-    .from("super_admins")
-    .select("email, user_id")
-    .eq("email", emailLower)
-    .maybeSingle();
-  if (!saRow) {
+  // Soft-200 with `code: "unauthorized"` is intentional here — the
+  // admin web's bulk-search UI distinguishes "you're not on the list"
+  // (no error toast, render an empty state) from a transport failure.
+  if (!(await checkSuperAdmin(admin, authRes.user))) {
     return json({ ok: false, code: "unauthorized", error: "Not a super-admin" });
-  }
-  if (saRow.user_id == null) {
-    void admin
-      .from("super_admins")
-      .update({ user_id: authRes.user.id })
-      .eq("email", emailLower)
-      .is("user_id", null);
   }
 
   // --- Google key ---

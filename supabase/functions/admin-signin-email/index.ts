@@ -15,8 +15,12 @@
 // Self-contained: own JWT verification, own DB writes via the service role.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
+import {
+  adminClient,
+  getAuthedUser,
+  readEFEnv,
+} from "../_shared/auth.ts";
 
 const ADMIN_EMAIL_DOMAIN = "@canzeco.com";
 
@@ -24,35 +28,18 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405);
 
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !ANON_KEY || !SERVICE_KEY) {
-    return json({ ok: false, error: "Server misconfigured" }, 500);
-  }
-
-  const authHeader = req.headers.get("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return json({ ok: false, error: "Missing bearer token" }, 401);
-  }
-
-  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
-    global: { headers: { Authorization: authHeader } },
-  });
-  const { data: userData, error: userError } = await userClient.auth.getUser();
-  if (userError || !userData.user) {
-    return json({ ok: false, error: "Invalid session" }, 401);
-  }
-  const user = userData.user;
-
-  const admin = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  const envRes = readEFEnv();
+  if (!envRes.ok) return envRes.response;
+  const authRes = await getAuthedUser(req, envRes.env);
+  if (!authRes.ok) return authRes.response;
+  const user = authRes.user.raw;
+  const userClient = authRes.userClient;
+  const admin = adminClient(envRes.env);
 
   // Gate 1: corp email only. Revoke the session if a non-corp email
   // somehow lands here — that user should never have been allowed to
   // hit this endpoint.
-  const email = user.email?.toLowerCase() ?? "";
+  const email = authRes.user.emailLower ?? "";
   if (!email.endsWith(ADMIN_EMAIL_DOMAIN)) {
     await admin.auth.admin.signOut(user.id, "global").catch(() => {});
     return json(

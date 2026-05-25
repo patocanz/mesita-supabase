@@ -27,7 +27,11 @@ import {
   readEFEnv,
 } from "../_shared/auth.ts";
 import { isEmailish } from "../_shared/input.ts";
-import { randomSixDigits, sha256Hex } from "../_shared/otp.ts";
+import {
+  insertPendingOtpVerification,
+  randomSixDigits,
+  sha256Hex,
+} from "../_shared/otp.ts";
 
 type Body = { venueId?: string; requesterEmail?: string };
 
@@ -123,38 +127,15 @@ Deno.serve(async (req) => {
   // mockCode just becomes null and the call actually places.
   const mockCode = Deno.env.get("TWILIO_AUTH_TOKEN") ? null : code;
 
-  // Dedup: drop any prior pending claim by this caller on this venue
-  // before inserting the new one. The partial unique index in
-  // migration 0014 catches concurrent inserts.
-  await admin
-    .from("venue_verifications")
-    .delete()
-    .eq("venue_id", venueId)
-    .eq("requester_id", userId)
-    .eq("status", "pending");
-
-  const { data: verification, error: insertError } = await admin
-    .from("venue_verifications")
-    .insert({
-      venue_id: venueId,
-      requester_id: userId,
-      method: "ai_call",
-      payload: {
-        phoneCalled: venue.phone,
-        channel,
-        codeHash,
-      },
-      requester_email: requesterEmail,
-      status: "pending",
-    })
-    .select("id")
-    .single();
-  if (insertError) {
-    return json(
-      { ok: false, error: `verification_insert: ${insertError.message}` },
-      500,
-    );
-  }
+  const insertRes = await insertPendingOtpVerification(admin, {
+    venueId,
+    userId,
+    requesterEmail,
+    method: "ai_call",
+    payload: { phoneCalled: venue.phone, channel },
+    codeHash,
+  });
+  if (!insertRes.ok) return insertRes.response;
 
   // TODO: when TWILIO_AUTH_TOKEN is wired, place the actual call/SMS
   // here. For now we return immediately so the UI can flip into the
@@ -162,7 +143,7 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    verificationId: verification.id,
+    verificationId: insertRes.verificationId,
     channel,
     phoneDialed: venue.phone,
     mockCode,

@@ -13,6 +13,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
 import {
   adminClient,
+  checkSuperAdmin,
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
@@ -30,33 +31,12 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const userId = authRes.user.id;
   const userEmail = authRes.user.email;
-  const emailLower = authRes.user.emailLower;
 
   // Auth: any signed-in user. Super-admin elevation (skips venue_members
   // and returns the requested venue) is granted when the caller's email
   // is in public.super_admins.
   const admin = adminClient(envRes.env);
-
-  // Allowlist check. Lazy-backfill user_id so future audit logs can
-  // join by uuid without re-reading auth.users.
-  let isSuperAdmin = false;
-  if (emailLower) {
-    const { data: saRow } = await admin
-      .from("super_admins")
-      .select("email, user_id")
-      .eq("email", emailLower)
-      .maybeSingle();
-    if (saRow) {
-      isSuperAdmin = true;
-      if (saRow.user_id == null) {
-        void admin
-          .from("super_admins")
-          .update({ user_id: userId })
-          .eq("email", emailLower)
-          .is("user_id", null);
-      }
-    }
-  }
+  const isSuperAdmin = await checkSuperAdmin(admin, authRes.user);
 
   let body: Body = {};
   try {
