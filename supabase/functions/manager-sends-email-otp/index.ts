@@ -31,7 +31,11 @@ import {
 } from "../_shared/auth.ts";
 import { isEmailish } from "../_shared/input.ts";
 import { isOnDomain } from "../_shared/onboarding.ts";
-import { randomSixDigits, sha256Hex } from "../_shared/otp.ts";
+import {
+  insertPendingOtpVerification,
+  randomSixDigits,
+  sha256Hex,
+} from "../_shared/otp.ts";
 
 type Body = { venueId?: string; requesterEmail?: string };
 
@@ -121,35 +125,15 @@ Deno.serve(async (req) => {
   const providerConfigured = !!Deno.env.get("RESEND_SUPABASE_API_KEY");
   const mockCode = providerConfigured ? null : code;
 
-  await admin
-    .from("venue_verifications")
-    .delete()
-    .eq("venue_id", venueId)
-    .eq("requester_id", userId)
-    .eq("status", "pending");
-
-  const { data: verification, error: insertError } = await admin
-    .from("venue_verifications")
-    .insert({
-      venue_id: venueId,
-      requester_id: userId,
-      method: "ai_email",
-      payload: {
-        emailSent: venue.email,
-        websiteUrl: venue.website_url,
-        codeHash,
-      },
-      requester_email: requesterEmail,
-      status: "pending",
-    })
-    .select("id")
-    .single();
-  if (insertError) {
-    return json(
-      { ok: false, error: `verification_insert: ${insertError.message}` },
-      500,
-    );
-  }
+  const insertRes = await insertPendingOtpVerification(admin, {
+    venueId,
+    userId,
+    requesterEmail,
+    method: "ai_email",
+    payload: { emailSent: venue.email, websiteUrl: venue.website_url },
+    codeHash,
+  });
+  if (!insertRes.ok) return insertRes.response;
 
   // TODO: when RESEND_SUPABASE_API_KEY (or whichever provider) is set,
   // send the actual email here. For now we return immediately so the
@@ -157,7 +141,7 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    verificationId: verification.id,
+    verificationId: insertRes.verificationId,
     sentTo: venue.email,
     mockCode,
   });

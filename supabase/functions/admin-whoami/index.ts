@@ -13,6 +13,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
 import {
   adminClient,
+  checkSuperAdmin,
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
@@ -27,27 +28,9 @@ Deno.serve(async (req) => {
   if (!envRes.ok) return envRes.response;
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
-  const { id: userId, email, emailLower } = authRes.user;
 
-  let isSuperAdmin = false;
-  if (emailLower) {
-    const admin = adminClient(envRes.env);
-    const { data: saRow } = await admin
-      .from("super_admins")
-      .select("email, user_id")
-      .eq("email", emailLower)
-      .maybeSingle();
-    if (saRow) {
-      isSuperAdmin = true;
-      if (saRow.user_id == null) {
-        void admin
-          .from("super_admins")
-          .update({ user_id: userId })
-          .eq("email", emailLower)
-          .is("user_id", null);
-      }
-    }
-  }
+  const admin = adminClient(envRes.env);
+  const isSuperAdmin = await checkSuperAdmin(admin, authRes.user);
 
-  return json({ ok: true, email, isSuperAdmin });
+  return json({ ok: true, email: authRes.user.email, isSuperAdmin });
 });
