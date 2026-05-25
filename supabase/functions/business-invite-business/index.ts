@@ -23,13 +23,13 @@ import {
   requireOwner,
 } from "../_shared/auth.ts";
 import { isEmailish } from "../_shared/input.ts";
-import { isBusinessRole, type BusinessRole } from "../_shared/roles.ts";
+import { isManagerRole, type ManagerRole } from "../_shared/roles.ts";
 import { newInviteToken } from "../_shared/tokens.ts";
 
 type Body = {
   venueId?: string;
   email?: string;
-  role?: BusinessRole;
+  role?: ManagerRole;
   redirectBase?: string;
 };
 
@@ -46,14 +46,14 @@ Deno.serve(async (req) => {
   try { body = (await req.json()) as Body; } catch { /* empty */ }
   const venueId = (body.venueId ?? "").trim();
   const email = (body.email ?? "").trim().toLowerCase();
-  const role = body.role ?? "business";
+  const role = body.role ?? "manager";
   const redirectBase = (body.redirectBase ?? "").trim().replace(/\/$/, "");
   if (!venueId) return json({ ok: false, error: "venueId is required" }, 400);
   if (!isEmailish(email)) {
     return json({ ok: false, error: "A valid email is required" }, 400);
   }
-  if (!isBusinessRole(role)) {
-    return json({ ok: false, error: "role must be owner | business | viewer" }, 400);
+  if (!isManagerRole(role)) {
+    return json({ ok: false, error: "role must be owner | manager | viewer" }, 400);
   }
 
   const admin = adminClient(envRes.env);

@@ -11,11 +11,14 @@
 -- helper functions are all renamed atomically. admin_reset_database() is
 -- rewritten because its body references the old table names.
 --
--- The two Postgres enums that carry a 'manager' value
--- (public.member_role and public.venue_role) are migrated using the
--- standard swap-the-enum-type pattern: create the new enum, switch every
--- column over, drop the old enum. We can't just drop a value from an
--- existing enum.
+-- The platform-level enum public.venue_role carries a 'manager' value
+-- that maps to the rebranded B2B role; it's migrated using the standard
+-- swap-the-enum-type pattern (create new enum, switch column, drop old).
+-- The per-venue tier enum public.member_role keeps its 'manager' value
+-- on purpose: 'manager' there is the Editor tier inside a single venue
+-- (owner / manager / viewer), distinct from the platform-level role.
+-- "Owner / Business / Viewer" would read awkwardly as a permissions
+-- hierarchy, so the rebrand only touches the platform role.
 --
 -- Finally, every auth.users row whose app_metadata.role = 'manager' is
 -- updated in place to 'business' so existing sessions continue to work
@@ -133,50 +136,14 @@ CREATE POLICY business_invites_select_by_venue_member
   );
 
 -- =====================================================================
--- 6. Enum values: 'manager' → 'business'
+-- 6. Enum value 'manager' → 'business' (platform role only)
 -- =====================================================================
 -- Postgres only supports ADD VALUE on an existing enum, never DROP
 -- VALUE. To rename the value we create a parallel enum, switch every
 -- column that references the old one, then drop the old type.
-
--- ----- public.member_role (used by public.venue_members.role and
---       public.business_invites.role; values become
---       owner / business / staff / viewer) -----
-CREATE TYPE public.member_role_new AS ENUM ('owner', 'business', 'staff', 'viewer');
-
--- Drop the column defaults before swapping types (defaults are
--- type-bound and would fail the cast otherwise).
-ALTER TABLE public.venue_members
-  ALTER COLUMN role DROP DEFAULT;
-ALTER TABLE public.business_invites
-  ALTER COLUMN role DROP DEFAULT;
-
-ALTER TABLE public.venue_members
-  ALTER COLUMN role TYPE public.member_role_new
-  USING (
-    CASE role::text
-      WHEN 'manager' THEN 'business'::public.member_role_new
-      ELSE role::text::public.member_role_new
-    END
-  );
-
-ALTER TABLE public.business_invites
-  ALTER COLUMN role TYPE public.member_role_new
-  USING (
-    CASE role::text
-      WHEN 'manager' THEN 'business'::public.member_role_new
-      ELSE role::text::public.member_role_new
-    END
-  );
-
-DROP TYPE public.member_role;
-ALTER TYPE public.member_role_new RENAME TO member_role;
-
--- Re-add defaults, now under the renamed enum, pointing at 'business'.
-ALTER TABLE public.venue_members
-  ALTER COLUMN role SET DEFAULT 'business'::public.member_role;
-ALTER TABLE public.business_invites
-  ALTER COLUMN role SET DEFAULT 'business'::public.member_role;
+--
+-- We only swap public.venue_role here. public.member_role keeps its
+-- 'manager' value on purpose (per-venue Editor tier, see header).
 
 -- ----- public.venue_role (used by public.venue_roles.role; values
 --       become staff / business) -----

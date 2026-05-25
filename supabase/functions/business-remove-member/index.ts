@@ -2,7 +2,7 @@
 //
 // Removes one team artefact from a venue. The `kind` discriminates:
 //
-//   business      → venue_members row (cannot remove last owner)
+//   manager      → venue_members row (cannot remove last owner)
 //   waiter       → venue_roles row
 //   mgrInvite    → business_invites row (revoke pending email invite)
 //   waiterInvite → staff_invites row (revoke pending waiter invite)
@@ -21,7 +21,7 @@ import {
   readEFEnv,
 } from "../_shared/auth.ts";
 
-const KINDS = ["business", "waiter", "mgrInvite", "waiterInvite"] as const;
+const KINDS = ["manager", "waiter", "mgrInvite", "waiterInvite"] as const;
 type Kind = (typeof KINDS)[number];
 type Body = { id?: string; kind?: Kind };
 
@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
   const kind = body.kind;
   if (!id) return json({ ok: false, error: "id is required" }, 400);
   if (!kind || !(KINDS as readonly string[]).includes(kind)) {
-    return json({ ok: false, error: "kind must be business | waiter | mgrInvite | waiterInvite" }, 400);
+    return json({ ok: false, error: "kind must be manager | waiter | mgrInvite | waiterInvite" }, 400);
   }
 
   const admin = adminClient(envRes.env);
@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (kind === "business" && target.targetIsOwner) {
+  if (kind === "manager" && target.targetIsOwner) {
     const { count } = await admin
       .from("venue_members")
       .select("id", { count: "exact", head: true })
@@ -96,7 +96,7 @@ async function loadTarget(
   callerId: string,
 ): Promise<LoadedTarget> {
   switch (kind) {
-    case "business": {
+    case "manager": {
       const row = await admin
         .from("venue_members")
         .select("venue_id, business_id, role")
@@ -160,7 +160,7 @@ function notFound(error: string, status: number): { ok: false; response: Respons
 
 async function deleteTarget(admin: SupabaseClient, kind: Kind, id: string) {
   switch (kind) {
-    case "business":
+    case "manager":
       return await admin.from("venue_members").delete().eq("id", id);
     case "waiter": {
       const [userId, venueIdFromKey] = id.split(":");

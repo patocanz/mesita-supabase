@@ -13,11 +13,11 @@ import {
   readEFEnv,
   requireOwner,
 } from "../_shared/auth.ts";
-import { isBusinessRole, type BusinessRole } from "../_shared/roles.ts";
+import { isManagerRole, type ManagerRole } from "../_shared/roles.ts";
 
 type Body = {
   memberId?: string;
-  role?: BusinessRole;
+  role?: ManagerRole;
 };
 
 Deno.serve(async (req) => {
@@ -34,8 +34,8 @@ Deno.serve(async (req) => {
   const memberId = (body.memberId ?? "").trim();
   const role = body.role;
   if (!memberId) return json({ ok: false, error: "memberId is required" }, 400);
-  if (!isBusinessRole(role)) {
-    return json({ ok: false, error: "role must be owner | business | viewer" }, 400);
+  if (!isManagerRole(role)) {
+    return json({ ok: false, error: "role must be owner | manager | viewer" }, 400);
   }
 
   const admin = adminClient(envRes.env);
