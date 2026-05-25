@@ -2,7 +2,7 @@
 //
 // Proxies Google Places API (New) Autocomplete so the Google key never
 // leaves Supabase. The key is read from the secret
-// `GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY` (set via Dashboard → Edge
+// `GMP_KEY` (set via Dashboard → Edge
 // Functions → Secrets, or `supabase secrets set`).
 //
 // Naming convention for third-party secrets:
@@ -72,13 +72,13 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
+  const apiKey = Deno.env.get("GMP_KEY");
   if (!apiKey) {
     return json({
       ok: false,
       code: "server_missing_key",
       error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY.",
+        "Mesita backend isn't configured for Google Places. Tell support — they need to set GMP_KEY.",
     });
   }
 

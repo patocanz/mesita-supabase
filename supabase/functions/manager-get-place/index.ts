@@ -5,7 +5,7 @@
 // added here, not on the client.
 //
 // JWT-protected: clients must send the Supabase anon JWT in `Authorization`.
-// Reads the Google key from the secret `GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY`.
+// Reads the Google key from the secret `GMP_KEY`.
 // (See manager-suggest-places for the naming convention.)
 //
 // Local:  supabase functions serve manager-get-place
@@ -67,13 +67,13 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY");
+  const apiKey = Deno.env.get("GMP_KEY");
   if (!apiKey) {
     return json({
       ok: false,
       code: "server_missing_key",
       error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set GOOGLE_MAPS_PLATFORM_SUPABASE_API_KEY.",
+        "Mesita backend isn't configured for Google Places. Tell support — they need to set GMP_KEY.",
     });
   }
 
