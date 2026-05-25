@@ -92,7 +92,10 @@ Deno.serve(async (req) => {
   }
 
   // --- Google key ---
-  const googleKey = Deno.env.get("SUPABASE_GMP_KEY");
+  // Prefer the new SUPABASE_GMP_KEY name; fall back to the legacy GMP_KEY
+  // so deployments work during the secret rename in the Supabase dashboard.
+  const googleKey =
+    Deno.env.get("SUPABASE_GMP_KEY") ?? Deno.env.get("GMP_KEY");
   if (!googleKey) {
     return json({
       ok: false,
