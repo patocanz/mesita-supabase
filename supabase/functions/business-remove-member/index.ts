@@ -2,9 +2,9 @@
 //
 // Removes one team artefact from a venue. The `kind` discriminates:
 //
-//   manager      → venue_members row (cannot remove last owner)
+//   editor       → venue_members row (cannot remove last owner)
 //   waiter       → venue_roles row
-//   mgrInvite    → business_invites row (revoke pending email invite)
+//   editorInvite → business_invites row (revoke pending email invite)
 //   waiterInvite → staff_invites row (revoke pending waiter invite)
 //
 // Owners (and super-admins) can remove anyone. Editors and viewers
@@ -21,7 +21,7 @@ import {
   readEFEnv,
 } from "../_shared/auth.ts";
 
-const KINDS = ["manager", "waiter", "mgrInvite", "waiterInvite"] as const;
+const KINDS = ["editor", "waiter", "editorInvite", "waiterInvite"] as const;
 type Kind = (typeof KINDS)[number];
 type Body = { id?: string; kind?: Kind };
 
@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
   const kind = body.kind;
   if (!id) return json({ ok: false, error: "id is required" }, 400);
   if (!kind || !(KINDS as readonly string[]).includes(kind)) {
-    return json({ ok: false, error: "kind must be manager | waiter | mgrInvite | waiterInvite" }, 400);
+    return json({ ok: false, error: "kind must be editor | waiter | editorInvite | waiterInvite" }, 400);
   }
 
   const admin = adminClient(envRes.env);
@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (kind === "manager" && target.targetIsOwner) {
+  if (kind === "editor" && target.targetIsOwner) {
     const { count } = await admin
       .from("venue_members")
       .select("id", { count: "exact", head: true })
@@ -96,7 +96,7 @@ async function loadTarget(
   callerId: string,
 ): Promise<LoadedTarget> {
   switch (kind) {
-    case "manager": {
+    case "editor": {
       const row = await admin
         .from("venue_members")
         .select("venue_id, business_id, role")
@@ -131,7 +131,7 @@ async function loadTarget(
         targetIsOwner: false,
       };
     }
-    case "mgrInvite":
+    case "editorInvite":
       return await loadInvite(admin, "business_invites", id);
     case "waiterInvite":
       return await loadInvite(admin, "staff_invites", id);
@@ -160,7 +160,7 @@ function notFound(error: string, status: number): { ok: false; response: Respons
 
 async function deleteTarget(admin: SupabaseClient, kind: Kind, id: string) {
   switch (kind) {
-    case "manager":
+    case "editor":
       return await admin.from("venue_members").delete().eq("id", id);
     case "waiter": {
       const [userId, venueIdFromKey] = id.split(":");
@@ -170,7 +170,7 @@ async function deleteTarget(admin: SupabaseClient, kind: Kind, id: string) {
         .eq("user_id", userId)
         .eq("venue_id", venueIdFromKey);
     }
-    case "mgrInvite":
+    case "editorInvite":
       return await admin.from("business_invites").delete().eq("id", id);
     case "waiterInvite":
       return await admin.from("staff_invites").delete().eq("id", id);
