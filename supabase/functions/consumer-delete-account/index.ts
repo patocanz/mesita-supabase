@@ -1,19 +1,19 @@
-// Supabase Edge Function — guest-delete-account
+// Supabase Edge Function — consumer-delete-account
 //
-// Authenticated. Deletes the caller's own guest account along with every
+// Authenticated. Deletes the caller's own consumer account along with every
 // dependent row (tickets, cashback_ledger entries). Also deletes the
 // underlying auth.users row so the email is freed up for re-signup.
 // Self-contained: verifies the JWT, then deletes via service role. Does
 // NOT call any other Edge Function.
 //
-// Cascade order matters: tickets and cashback_ledger reference guests
+// Cascade order matters: tickets and cashback_ledger reference consumers
 // with ON DELETE RESTRICT, so they must be removed first. The
-// public.guests row PK references auth.users(id) ON DELETE CASCADE, so
-// deleting the auth row drops the guests row too — we delete the auth
+// public.consumers row PK references auth.users(id) ON DELETE CASCADE, so
+// deleting the auth row drops the consumers row too — we delete the auth
 // row last for that reason.
 //
-// Local:  supabase functions serve guest-delete-account
-// Deploy: supabase functions deploy guest-delete-account
+// Local:  supabase functions serve consumer-delete-account
+// Deploy: supabase functions deploy consumer-delete-account
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
@@ -41,7 +41,7 @@ Deno.serve(async (req) => {
   const { error: ledgerErr } = await admin
     .from("cashback_ledger")
     .delete()
-    .eq("guest_id", userId);
+    .eq("consumer_id", userId);
   if (ledgerErr) {
     return json({ ok: false, error: `cashback_ledger_delete: ${ledgerErr.message}` }, 500);
   }
@@ -49,13 +49,13 @@ Deno.serve(async (req) => {
   const { error: ticketsErr } = await admin
     .from("tickets")
     .delete()
-    .eq("guest_id", userId);
+    .eq("consumer_id", userId);
   if (ticketsErr) {
     return json({ ok: false, error: `tickets_delete: ${ticketsErr.message}` }, 500);
   }
 
-  // public.guests is ON DELETE CASCADE from auth.users — dropping the
-  // auth row removes the guest row automatically. We delete the auth
+  // public.consumers is ON DELETE CASCADE from auth.users — dropping the
+  // auth row removes the consumer row automatically. We delete the auth
   // user via the admin API to also kill the session + free the email.
   const { error: authErr } = await admin.auth.admin.deleteUser(userId);
   if (authErr) {

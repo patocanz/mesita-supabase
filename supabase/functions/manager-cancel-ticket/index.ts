@@ -1,7 +1,7 @@
 // Supabase Edge Function — manager-cancel-ticket
 //
 // Authenticated. Validator cancels a pending_pay ticket they opened by
-// mistake (wrong total, guest left without paying, etc.). Only the
+// mistake (wrong total, consumer left without paying, etc.). Only the
 // venue's members can cancel. Paid tickets cannot be cancelled — those
 // need an explicit refund flow (out of scope for now).
 

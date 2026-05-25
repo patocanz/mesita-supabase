@@ -20,7 +20,7 @@
 // Stripe webhook fires on an informal ticket), we still reject below.
 //
 // Authorisation: either a venue_member of the ticket's venue OR the
-// ticket's guest can call this. (In v0 the validator marks paid manually;
+// ticket's consumer can call this. (In v0 the validator marks paid manually;
 // once a Stripe webhook is wired up that webhook becomes the trusted
 // caller and this function becomes the shared write path.)
 //
@@ -66,7 +66,7 @@ Deno.serve(async (req) => {
   const ticketRow = await admin
     .from("tickets")
     .select(
-      "id, venue_id, guest_id, kind, status, story_status, total_cents, cashback_cents, cashback_percent, redeem_cents, paid_at",
+      "id, venue_id, consumer_id, kind, status, story_status, total_cents, cashback_cents, cashback_percent, redeem_cents, paid_at",
     )
     .eq("id", ticketId)
     .maybeSingle();
@@ -90,8 +90,8 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Authorisation: venue member OR the ticket's guest.
-  let authorised = ticket.guest_id === userId;
+  // Authorisation: venue member OR the ticket's consumer.
+  let authorised = ticket.consumer_id === userId;
   if (!authorised) {
     const m = await checkMembership(admin, authRes.user, ticket.venue_id);
     authorised = m.isSuperAdmin || m.role != null;
@@ -143,7 +143,7 @@ Deno.serve(async (req) => {
       ticket: updated.data,
       cashbackCreditedCents: 0,
       cashbackRedeemedCents: 0,
-      guestBalanceAfterCents: null,
+      consumerBalanceAfterCents: null,
       awaitingStory: true,
     });
   }
@@ -154,18 +154,18 @@ Deno.serve(async (req) => {
   const cashbackCents = ticket.cashback_cents ?? 0;
   const redeemCents = ticket.redeem_cents ?? 0;
 
-  const guestRow = await admin
-    .from("guests")
+  const consumerRow = await admin
+    .from("consumers")
     .select("cashback_balance_cents")
-    .eq("id", ticket.guest_id)
+    .eq("id", ticket.consumer_id)
     .single();
-  if (guestRow.error) {
+  if (consumerRow.error) {
     return json(
-      { ok: false, error: `guest_balance_read: ${guestRow.error.message}` },
+      { ok: false, error: `consumer_balance_read: ${consumerRow.error.message}` },
       500,
     );
   }
-  let balance = guestRow.data.cashback_balance_cents ?? 0;
+  let balance = consumerRow.data.cashback_balance_cents ?? 0;
 
   if (redeemCents > 0) {
     if (redeemCents > balance) {
@@ -175,14 +175,14 @@ Deno.serve(async (req) => {
         {
           ok: false,
           code: "redeem_exceeds_balance",
-          error: `Guest balance dropped below the ${redeemCents} cents this ticket would redeem.`,
+          error: `Consumer balance dropped below the ${redeemCents} cents this ticket would redeem.`,
         },
         409,
       );
     }
     balance -= redeemCents;
     const debit = await admin.from("cashback_ledger").insert({
-      guest_id: ticket.guest_id,
+      consumer_id: ticket.consumer_id,
       ticket_id: ticket.id,
       venue_id: ticket.venue_id,
       delta_cents: -redeemCents,
@@ -200,7 +200,7 @@ Deno.serve(async (req) => {
   if (cashbackCents > 0) {
     balance += cashbackCents;
     const credit = await admin.from("cashback_ledger").insert({
-      guest_id: ticket.guest_id,
+      consumer_id: ticket.consumer_id,
       ticket_id: ticket.id,
       venue_id: ticket.venue_id,
       delta_cents: cashbackCents,
@@ -217,14 +217,14 @@ Deno.serve(async (req) => {
 
   if (redeemCents > 0 || cashbackCents > 0) {
     const balanceUpdate = await admin
-      .from("guests")
+      .from("consumers")
       .update({ cashback_balance_cents: balance })
-      .eq("id", ticket.guest_id);
+      .eq("id", ticket.consumer_id);
     if (balanceUpdate.error) {
       return json(
         {
           ok: false,
-          error: `guest_balance_write: ${balanceUpdate.error.message}`,
+          error: `consumer_balance_write: ${balanceUpdate.error.message}`,
         },
         500,
       );
@@ -236,7 +236,7 @@ Deno.serve(async (req) => {
     ticket: updated.data,
     cashbackCreditedCents: cashbackCents,
     cashbackRedeemedCents: redeemCents,
-    guestBalanceAfterCents: balance,
+    consumerBalanceAfterCents: balance,
     awaitingStory: false,
   });
 });

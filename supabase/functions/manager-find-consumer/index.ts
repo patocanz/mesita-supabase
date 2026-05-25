@@ -1,7 +1,7 @@
-// Supabase Edge Function — manager-find-guest
+// Supabase Edge Function — manager-find-consumer
 //
-// Authenticated. A validator (any venue_member) looks up a guest by
-// the 6-char code on their QR. Returns the guest's display name +
+// Authenticated. A validator (any venue_member) looks up a consumer by
+// the 6-char code on their QR. Returns the consumer's display name +
 // current cashback balance so the validator UI can show "Pato — $55
 // available" before opening a ticket. Membership of *some* venue is
 // enough — we don't enforce which venue here because lookup is global.
@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
   const admin = adminClient(envRes.env);
 
   // Caller must be a member of at least one venue. This blocks random
-  // signed-in guests from probing other people's codes for their names /
+  // signed-in consumers from probing other people's codes for their names /
   // balances.
   const callerMembership = await admin
     .from("venue_members")
@@ -53,17 +53,17 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Not a venue member" }, 403);
   }
 
-  const { data: guest, error } = await admin
-    .from("guests")
+  const { data: consumer, error } = await admin
+    .from("consumers")
     .select("id, code, full_name, cashback_balance_cents")
     .eq("code", code)
     .maybeSingle();
   if (error) {
     return json({ ok: false, error: `lookup: ${error.message}` }, 500);
   }
-  if (!guest) {
-    return json({ ok: false, error: `No guest with code ${code}` }, 404);
+  if (!consumer) {
+    return json({ ok: false, error: `No consumer with code ${code}` }, 404);
   }
 
-  return json({ ok: true, guest });
+  return json({ ok: true, consumer });
 });

@@ -1,6 +1,6 @@
 // Supabase Edge Function — staff-accept-invite
 //
-// Called by a logged-in user (already authed via guest phone OTP) to
+// Called by a logged-in user (already authed via consumer phone OTP) to
 // redeem an invite token a manager sent them. Steps:
 //
 //   1. Validate the invite token: exists, unexpired, unclaimed.
@@ -123,7 +123,7 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: `invite_claim: ${claim.error.message}` }, 500);
   }
 
-  // 4. Promote app_metadata.role from 'guest' (or unset) to 'staff'.
+  // 4. Promote app_metadata.role from 'consumer' (or unset) to 'staff'.
   //    Skip if the user is already a manager/admin (they shouldn't be in
   //    this pool, but defence in depth).
   const currentRole =

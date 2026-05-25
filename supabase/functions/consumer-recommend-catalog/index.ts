@@ -1,11 +1,11 @@
-// Supabase Edge Function — guest-recommend-catalog
+// Supabase Edge Function — consumer-recommend-catalog
 //
 // Builds a personalised catalog: up to 10 dynamically-proposed category
 // rows, each with up to 10 RAG-ranked venues. The categories are NOT a
 // prebuilt taxonomy — an LLM proposes them per request from the venue
 // mix in the user's area plus user context (location, time, profile).
 //
-// Architecture mirrors guest-recommend-deck:
+// Architecture mirrors consumer-recommend-deck:
 //
 //   1. Pull a wider candidate pool (default 300) by bounding-box radius.
 //   2. Lazily embed any candidates missing an embedding (batched, capped).
@@ -18,8 +18,8 @@
 //   6. Cross-category dedupe so a venue appears in at most 2 buckets
 //      (lets a really good place repeat once but not seven times).
 //
-// Local:  supabase functions serve guest-recommend-catalog
-// Deploy: supabase functions deploy guest-recommend-catalog
+// Local:  supabase functions serve consumer-recommend-catalog
+// Deploy: supabase functions deploy consumer-recommend-catalog
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -136,7 +136,7 @@ Deno.serve(async (req) => {
   }
 
   // ── 3. Propose dynamic categories with an LLM ──────────────────────
-  const profile = userId && userClient ? await fetchGuestProfile(userClient, userId) : null;
+  const profile = userId && userClient ? await fetchConsumerProfile(userClient, userId) : null;
   let proposed: ProposedCategory[];
   if (OPENAI_KEY) {
     try {
@@ -149,7 +149,7 @@ Deno.serve(async (req) => {
         apiKey: OPENAI_KEY,
       });
     } catch (err) {
-      console.error("[guest-recommend-catalog] propose failed:", err);
+      console.error("[consumer-recommend-catalog] propose failed:", err);
       proposed = fallbackCategories(candidates, maxCategories);
     }
   } else {
@@ -166,7 +166,7 @@ Deno.serve(async (req) => {
     try {
       intentVecs = await embedBatch(proposed.map((c) => c.intent_query), OPENAI_KEY);
     } catch (err) {
-      console.error("[guest-recommend-catalog] intent embed failed:", err);
+      console.error("[consumer-recommend-catalog] intent embed failed:", err);
       intentVecs = [];
     }
   } else {
@@ -248,7 +248,7 @@ type VenueRow = {
   embedding_source_hash: string | null;
 };
 
-type GuestProfile = {
+type ConsumerProfile = {
   full_name: string | null;
   country: string | null;
   birthday: string | null;
@@ -284,7 +284,7 @@ async function proposeCategories({
   apiKey,
 }: {
   candidates: VenueRow[];
-  profile: GuestProfile | null;
+  profile: ConsumerProfile | null;
   lat: number | null;
   lng: number | null;
   maxCategories: number;
@@ -403,7 +403,7 @@ function pickEmoji(raw: unknown): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Embedding helpers (mirrors guest-recommend-deck — kept inline so each EF
+// Embedding helpers (mirrors consumer-recommend-deck — kept inline so each EF
 // stays self-contained per the "no function-to-function calls" rule)
 // ─────────────────────────────────────────────────────────────────────
 
@@ -459,7 +459,7 @@ async function embedAndPersist(
       }),
     });
     if (!r.ok) {
-      console.error("[guest-recommend-catalog] batch-embed HTTP", r.status, (await r.text()).slice(0, 240));
+      console.error("[consumer-recommend-catalog] batch-embed HTTP", r.status, (await r.text()).slice(0, 240));
       return out;
     }
     const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
@@ -477,14 +477,14 @@ async function embedAndPersist(
         })
         .eq("id", inp.id);
       if (error) {
-        console.error("[guest-recommend-catalog] embed write:", error.message);
+        console.error("[consumer-recommend-catalog] embed write:", error.message);
         return;
       }
       out.set(inp.id, { embedding: v, hash: inp.hash });
     }));
     return out;
   } catch (err) {
-    console.error("[guest-recommend-catalog] embed exception:", err);
+    console.error("[consumer-recommend-catalog] embed exception:", err);
     return out;
   }
 }
@@ -551,16 +551,16 @@ function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: numb
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
-async function fetchGuestProfile(
+async function fetchConsumerProfile(
   client: ReturnType<typeof createClient>,
   userId: string,
-): Promise<GuestProfile | null> {
+): Promise<ConsumerProfile | null> {
   const { data } = await client
-    .from("guests")
+    .from("consumers")
     .select("full_name, country, birthday, sex")
     .eq("id", userId)
     .maybeSingle();
-  return (data as GuestProfile | null) ?? null;
+  return (data as ConsumerProfile | null) ?? null;
 }
 
 function clampPositive(v: unknown, def: number, max: number): number {

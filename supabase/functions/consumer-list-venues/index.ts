@@ -1,10 +1,10 @@
-// Supabase Edge Function — guest-list-venues
+// Supabase Edge Function — consumer-list-venues
 //
-// Public endpoint. Returns venues that are visible to guests
+// Public endpoint. Returns venues that are visible to consumers
 // (status in 'active', 'lead'). Self-contained: no calls to other functions.
 //
-// Local:  supabase functions serve guest-list-venues
-// Deploy: supabase functions deploy guest-list-venues
+// Local:  supabase functions serve consumer-list-venues
+// Deploy: supabase functions deploy consumer-list-venues
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -30,7 +30,7 @@ Deno.serve(async (req) => {
 
   // Anon client is sufficient: the venues RLS policy already restricts SELECT
   // to status in ('active', 'lead') for anon + authenticated. This is the
-  // single source of truth for what guests are allowed to see.
+  // single source of truth for what consumers are allowed to see.
   const supabase = createClient(supabaseUrl, anonKey);
 
   // Limit can come from a JSON body (POST from supabase.functions.invoke) or

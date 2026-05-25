@@ -1,6 +1,6 @@
-// Supabase Edge Function — guest-recommend-deck
+// Supabase Edge Function — consumer-recommend-deck
 //
-// Returns a curated 20-card deck for the guest swipe view. Anonymous
+// Returns a curated 20-card deck for the consumer swipe view. Anonymous
 // callers OK (the discover surface is public until sign-up). The function
 // does RAG-style ranking:
 //
@@ -16,8 +16,8 @@
 // them inline (single batched OpenAI call) before ranking, so the catalog
 // self-heals over time without needing a separate cron.
 //
-// Local:  supabase functions serve guest-recommend-deck
-// Deploy: supabase functions deploy guest-recommend-deck
+// Local:  supabase functions serve consumer-recommend-deck
+// Deploy: supabase functions deploy consumer-recommend-deck
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -55,7 +55,7 @@ Deno.serve(async (req) => {
   }
 
   // Caller is optional — we honour the bearer if present so we can read
-  // the signed-in guest's profile for personalisation, but the public
+  // the signed-in consumer's profile for personalisation, but the public
   // anonymous case is the common path. We still need a Supabase client
   // for that; pass-through the auth header so RLS-aware reads work.
   const authHeader = req.headers.get("Authorization") ?? "";
@@ -141,7 +141,7 @@ Deno.serve(async (req) => {
   }
 
   // ── 3. Compose user-intent query ───────────────────────────────────
-  const profile = userId && userClient ? await fetchGuestProfile(userClient, userId) : null;
+  const profile = userId && userClient ? await fetchConsumerProfile(userClient, userId) : null;
   const intent = composeIntent({
     profile,
     lat,
@@ -156,7 +156,7 @@ Deno.serve(async (req) => {
       const intentVec = await embed(intent, OPENAI_KEY);
       ranked = rankByCosine(candidates, intentVec);
     } catch (err) {
-      console.error("[guest-recommend-deck] intent embed failed:", err);
+      console.error("[consumer-recommend-deck] intent embed failed:", err);
       ranked = fallbackRank(candidates);
     }
   } else {
@@ -210,7 +210,7 @@ type VenueRow = {
   embedding_source_hash: string | null;
 };
 
-type GuestProfile = {
+type ConsumerProfile = {
   full_name: string | null;
   country: string | null;
   birthday: string | null;
@@ -231,14 +231,14 @@ function composeIntent({
   lng,
   candidates,
 }: {
-  profile: GuestProfile | null;
+  profile: ConsumerProfile | null;
   lat: number | null;
   lng: number | null;
   candidates: VenueRow[];
 }): string {
   const parts: string[] = [];
   // Time-of-day handle. The Edge runtime is UTC; we don't know the
-  // guest's timezone, so this is rough — gives the embedder a flavour,
+  // consumer's timezone, so this is rough — gives the embedder a flavour,
   // not a hard filter.
   const now = new Date();
   const hour = now.getUTCHours();
@@ -247,7 +247,7 @@ function composeIntent({
   else if (hour < 20) parts.push("golden hour rooftops and early dinner");
   else parts.push("dinner, cocktails, and late-night spots");
 
-  if (profile?.country) parts.push(`a guest from ${profile.country}`);
+  if (profile?.country) parts.push(`a consumer from ${profile.country}`);
   if (lat != null && lng != null) parts.push(`within ${DEFAULT_RADIUS_KM}km of this location`);
 
   // Soft hint about the local mix so the embedding leans into the
@@ -339,7 +339,7 @@ async function embedAndPersist(
     });
     if (!r.ok) {
       const errText = (await r.text()).slice(0, 240);
-      console.error("[guest-recommend-deck] batch-embed HTTP", r.status, errText);
+      console.error("[consumer-recommend-deck] batch-embed HTTP", r.status, errText);
       return out;
     }
     const data = (await r.json()) as {
@@ -362,14 +362,14 @@ async function embedAndPersist(
         })
         .eq("id", inp.id);
       if (error) {
-        console.error("[guest-recommend-deck] embed write:", error.message);
+        console.error("[consumer-recommend-deck] embed write:", error.message);
         return;
       }
       out.set(inp.id, { embedding: v, hash: inp.hash });
     }));
     return out;
   } catch (err) {
-    console.error("[guest-recommend-deck] embed exception:", err);
+    console.error("[consumer-recommend-deck] embed exception:", err);
     return out;
   }
 }
@@ -486,16 +486,16 @@ function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: numb
 // Misc
 // ─────────────────────────────────────────────────────────────────────
 
-async function fetchGuestProfile(
+async function fetchConsumerProfile(
   client: ReturnType<typeof createClient>,
   userId: string,
-): Promise<GuestProfile | null> {
+): Promise<ConsumerProfile | null> {
   const { data } = await client
-    .from("guests")
+    .from("consumers")
     .select("full_name, country, birthday, sex")
     .eq("id", userId)
     .maybeSingle();
-  return (data as GuestProfile | null) ?? null;
+  return (data as ConsumerProfile | null) ?? null;
 }
 
 function clampPositive(v: unknown, def: number, max: number): number {

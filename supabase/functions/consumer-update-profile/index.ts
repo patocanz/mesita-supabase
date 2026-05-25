@@ -1,9 +1,9 @@
-// Supabase Edge Function — guest-update-profile
+// Supabase Edge Function — consumer-update-profile
 //
-// Authenticated. The guest writes their own onboarding details (name, sex,
-// birthday, country, phone). Auto-creates the guest row on first call so
+// Authenticated. The consumer writes their own onboarding details (name, sex,
+// birthday, country, phone). Auto-creates the consumer row on first call so
 // onboarding works even if the user hasn't hit /qr yet to trigger
-// guest-get-profile's lazy create.
+// consumer-get-profile's lazy create.
 //
 // Self-contained: own JWT verification, own DB writes via the service role.
 
@@ -72,30 +72,30 @@ Deno.serve(async (req) => {
 
   const admin = adminClient(envRes.env);
 
-  // Ensure a guest row exists. If not, create it with a generated code so
+  // Ensure a consumer row exists. If not, create it with a generated code so
   // the validator can scan the QR immediately after onboarding.
   const existing = await admin
-    .from("guests")
+    .from("consumers")
     .select("id, code")
     .eq("id", userId)
     .maybeSingle();
   if (existing.error) {
-    return json({ ok: false, error: `guest_read: ${existing.error.message}` }, 500);
+    return json({ ok: false, error: `consumer_read: ${existing.error.message}` }, 500);
   }
   if (!existing.data) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const codeResult = await admin.rpc("generate_guest_code");
+      const codeResult = await admin.rpc("generate_consumer_code");
       if (codeResult.error) {
         return json({ ok: false, error: `code_gen: ${codeResult.error.message}` }, 500);
       }
       const inserted = await admin
-        .from("guests")
+        .from("consumers")
         .insert({ id: userId, code: codeResult.data as string })
         .select("id, code")
         .single();
       if (!inserted.error) break;
       if (inserted.error.code !== "23505") {
-        return json({ ok: false, error: `guest_create: ${inserted.error.message}` }, 500);
+        return json({ ok: false, error: `consumer_create: ${inserted.error.message}` }, 500);
       }
     }
   }
@@ -114,7 +114,7 @@ Deno.serve(async (req) => {
   }
 
   const update = await admin
-    .from("guests")
+    .from("consumers")
     .update(patch)
     .eq("id", userId)
     .select(
@@ -128,8 +128,8 @@ Deno.serve(async (req) => {
         409,
       );
     }
-    return json({ ok: false, error: `guest_update: ${update.error.message}` }, 500);
+    return json({ ok: false, error: `consumer_update: ${update.error.message}` }, 500);
   }
 
-  return json({ ok: true, guest: update.data });
+  return json({ ok: true, consumer: update.data });
 });

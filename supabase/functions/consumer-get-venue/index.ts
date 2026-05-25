@@ -1,10 +1,10 @@
-// Supabase Edge Function — guest-get-venue
+// Supabase Edge Function — consumer-get-venue
 //
 // Public. Returns a single venue by id (uuid) or slug, plus the manager
 // authority info needed for the detail page (vibe / channels / etc.).
 // Anon-readable but the venues RLS policy still gates which rows ship.
 //
-// Caller: guest. Verb: get. Noun: venue. (Per the new <caller>-<verb>-<noun>
+// Caller: consumer. Verb: get. Noun: venue. (Per the new <caller>-<verb>-<noun>
 // naming convention.)
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
