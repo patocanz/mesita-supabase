@@ -1,4 +1,4 @@
-// Auth + venue-membership helpers shared by every manager-* Edge
+// Auth + venue-membership helpers shared by every business-* Edge
 // Function on the Team surface (and reusable anywhere else that needs
 // "is this caller allowed to touch this venue?").
 //
@@ -108,11 +108,11 @@ export function adminClient(env: EFEnv): SupabaseClient {
 
 // ─── Membership ─────────────────────────────────────────────────────
 
-export type MembershipRole = "owner" | "manager" | "viewer" | "staff";
+export type MembershipRole = "owner" | "business" | "viewer" | "staff";
 
 export type Membership = {
   isSuperAdmin: boolean;
-  // The venue_members.role for managers, or "staff" for super-admins
+  // The venue_members.role for businesses, or "staff" for super-admins
   // who landed without a row — owners write access either way.
   role: MembershipRole | null;
 };
@@ -136,7 +136,7 @@ export async function checkMembership(
     .from("venue_members")
     .select("role")
     .eq("venue_id", venueId)
-    .eq("manager_id", user.id)
+    .eq("business_id", user.id)
     .maybeSingle();
 
   const [sa, vm] = await Promise.all([saPromise, vmPromise]);
@@ -154,7 +154,7 @@ export async function checkMembership(
 // Pattern moved out of 12+ admin EFs that each reimplemented the same
 // lookup + lazy backfill. Callers that need a hard 403 should use
 // `requireSuperAdmin` below; callers that want to render a soft "you're
-// not on the list" state (admin-whoami, manager-get-overview) should
+// not on the list" state (admin-whoami, business-get-overview) should
 // call this directly and inspect the boolean.
 export async function checkSuperAdmin(
   admin: SupabaseClient,

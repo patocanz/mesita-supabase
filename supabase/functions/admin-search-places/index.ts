@@ -9,7 +9,7 @@
 // verify_jwt = true gates non-bearer callers at the gateway.
 //
 // Google key: `SUPA_GMP_KEY` (same secret used
-// by manager-suggest-places / manager-get-place). The key never leaves
+// by business-suggest-places / business-get-place). The key never leaves
 // Supabase — clients call this EF, this EF calls Google.
 //
 // Wire status is always 200 with a `{ ok, ... }` body — same shape as the

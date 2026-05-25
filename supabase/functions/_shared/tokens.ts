@@ -1,5 +1,5 @@
 // URL-safe random invite tokens. Same shape used by both
-// staff_invites and manager_invites — 18 random bytes encoded as
+// staff_invites and business_invites — 18 random bytes encoded as
 // base64url. Matches the SQL helper public.generate_invite_token().
 
 export function newInviteToken(byteLength = 18): string {

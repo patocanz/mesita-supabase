@@ -1,6 +1,6 @@
 // Supabase Edge Function — consumer-get-venue
 //
-// Public. Returns a single venue by id (uuid) or slug, plus the manager
+// Public. Returns a single venue by id (uuid) or slug, plus the business
 // authority info needed for the detail page (vibe / channels / etc.).
 // Anon-readable but the venues RLS policy still gates which rows ship.
 //

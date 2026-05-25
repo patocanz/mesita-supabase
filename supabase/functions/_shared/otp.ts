@@ -2,8 +2,8 @@
 //
 // Why centralised: the phone/email OTP flows both generate a 6-digit
 // code, hash it, store the hash on the venue_verifications row, and
-// compare on redemption. Four EFs (`manager-sends-phone-otp`,
-// `manager-sends-email-otp`, `manager-verifies-{phone,email}`) used to
+// compare on redemption. Four EFs (`business-sends-phone-otp`,
+// `business-sends-email-otp`, `business-verifies-{phone,email}`) used to
 // reimplement the same primitives + flow control. The higher-level
 // helpers below (`insertPendingOtpVerification`, `redeemOtpVerification`)
 // keep both paths in lock-step. Pure utilities — no Deno globals
@@ -204,7 +204,7 @@ export async function redeemOtpVerification(
 
   const { error: memberError } = await admin.from("venue_members").insert({
     venue_id: verification.venue_id,
-    manager_id: args.userId,
+    business_id: args.userId,
     role: "owner",
   });
   if (memberError) {

@@ -2,9 +2,9 @@
 //
 // Resolves a Google Place ID to a Mesita venue (id + name + slug) when
 // the venue is already onboarded. Used by the admin console's "open in
-// manager" link generator: the admin pastes a Place ID, this EF returns
+// business" link generator: the admin pastes a Place ID, this EF returns
 // the venue.id, and the admin web builds a
-// https://manager.mesita.ai/unit/<id>/home URL the operator can open.
+// https://business.mesita.ai/unit/<id>/home URL the operator can open.
 //
 // Auth: caller's JWT email must be in public.super_admins.
 // verify_jwt = true gates non-bearer callers at the gateway.

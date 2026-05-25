@@ -1,7 +1,7 @@
 // Supabase Edge Function — admin-reset-database
 //
 // DESTRUCTIVE. Wipes all operational data (venues, tickets, consumers,
-// managers, staff invites, verifications, cashback ledger, venue roles)
+// businesses, staff invites, verifications, cashback ledger, venue roles)
 // and deletes every auth.users row that isn't a super-admin. Preserves
 // public.super_admins (and their auth accounts) plus the app_settings
 // config singleton.

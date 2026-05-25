@@ -10,7 +10,7 @@
 //   - The AI bot polls 'submitted' rows, attempts to match the @mention
 //     or location tag, and flips to 'ai_verified' / 'ai_rejected' on its own.
 //   - Anything that ends up 'ai_rejected' falls to the waiter via
-//     manager-verify-story.
+//     business-verify-story.
 //
 // Auth model: the caller must be the ticket's consumer. The validator does
 // NOT submit on the consumer's behalf — that's the whole point of the proof.

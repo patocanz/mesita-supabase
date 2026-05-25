@@ -4,7 +4,7 @@
 // hand-typed VENUE_COLUMNS string and they drifted: consumer EFs were missing
 // the columns added by the Place redesign (timezone, hours, description,
 // menu_pdf_url, tags, whatsapp_pr_urls, instagram_pr_urls, the signal
-// fields, etc.), so consumers literally couldn't see what managers had just
+// fields, etc.), so consumers literally couldn't see what businesses had just
 // edited. Importing from here keeps every read in lock-step.
 //
 // If you add a column to venues, update this file once and every reader
@@ -61,7 +61,7 @@ const COLUMNS: readonly string[] = [
   "whatsapp_pr_urls",
   "instagram_pr_urls",
   // Read-only signal columns — populated by enrichment, never by the
-  // manager. Shown on the Place page's Signals section and on consumer
+  // business. Shown on the Place page's Signals section and on consumer
   // surfaces that compare venues.
   "google_stars_overall",
   "google_review_count",
@@ -73,7 +73,7 @@ const COLUMNS: readonly string[] = [
   "mesita_review_count",
   "mesita_visitor_count",
   "instagram_followers_count",
-  // Promos page section toggles. Boolean, manager-controlled, persisted
+  // Promos page section toggles. Boolean, business-controlled, persisted
   // so the on/off state survives page reloads.
   "segmentation_basic_enabled",
   "segmentation_advanced_enabled",
@@ -82,9 +82,9 @@ const COLUMNS: readonly string[] = [
 ];
 
 // Consumer reads — used by every public/consumer-facing EF. No `updated_at`
-// because consumers don't need to see when the manager last touched a row.
+// because consumers don't need to see when the business last touched a row.
 export const VENUE_PUBLIC_COLUMNS = COLUMNS.join(", ");
 
-// Manager reads — includes `updated_at` so the manager UI can show
+// Business reads — includes `updated_at` so the business UI can show
 // "saved · 2 min ago" style affordances.
-export const VENUE_MANAGER_COLUMNS = [...COLUMNS, "updated_at"].join(", ");
+export const VENUE_BUSINESS_COLUMNS = [...COLUMNS, "updated_at"].join(", ");
