@@ -57,6 +57,9 @@ const COLUMNS: readonly string[] = [
   "diamond_rate",
   "photos",
   "menu_pdf_url",
+  // Optional display name for menu_pdf_url, e.g. "Dinner menu" /
+  // "Wine list". Null = consumer falls back to "Full menu" copy.
+  "menu_pdf_name",
   "tags",
   // Channel URLs — primary, secondary, and PR. The Place page hides
   // secondary + PR for now but the values still round-trip through every
