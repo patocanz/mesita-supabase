@@ -65,7 +65,7 @@ Deno.serve(async (req) => {
   }
   // Method gate: video always shows; ai_call only shows once the
   // operator has confirmed the OTP (codeVerifiedAt stamped by
-  // business-verify-call-code when auto_verify_ai_call was off).
+  // business-verifies-phone when auto_verify_ai_call was off).
   query = query.or(
     "method.eq.video,and(method.eq.ai_call,payload->>codeVerifiedAt.not.is.null)",
   );
