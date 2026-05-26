@@ -142,6 +142,17 @@ verify_jwt = true
 [functions.consumer-recommend-deck]
 verify_jwt = true
 
+# --- Artificial callers (recommender-*) ---
+#
+# Internal-only services with no end user. Natural-caller EFs invoke them
+# with the service-role bearer + an X-Internal-Caller header; the gateway
+# is open (verify_jwt = false) and authentication happens inside the EF
+# via _shared/internal.ts → requireInternalCaller. Never exposed to the
+# web — clients call the natural-caller EFs which delegate here.
+
+[functions.recommender-rank-deck]
+verify_jwt = false
+
 # Authed consumer writes / reads tied to the signed-in consumer's own data.
 [functions.consumer-get-profile]
 verify_jwt = true
