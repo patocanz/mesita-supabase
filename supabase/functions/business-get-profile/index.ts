@@ -37,7 +37,7 @@ Deno.serve(async (req) => {
   // Read; on miss, insert and re-read. Race-safe because (id) is the PK.
   const existing = await admin
     .from("businesses")
-    .select("id, full_name, email, phone, created_at")
+    .select("id, full_name, first_name, last_name, email, phone, created_at")
     .eq("id", userId)
     .maybeSingle();
   if (existing.error) {
@@ -54,7 +54,7 @@ Deno.serve(async (req) => {
         .from("businesses")
         .update({ email: userEmail })
         .eq("id", userId)
-        .select("id, full_name, email, phone, created_at")
+        .select("id, full_name, first_name, last_name, email, phone, created_at")
         .single();
       if (!refresh.error) {
         return json({ ok: true, business: refresh.data });
@@ -66,7 +66,7 @@ Deno.serve(async (req) => {
   const inserted = await admin
     .from("businesses")
     .insert({ id: userId, email: userEmail })
-    .select("id, full_name, email, phone, created_at")
+    .select("id, full_name, first_name, last_name, email, phone, created_at")
     .single();
   if (inserted.error) {
     return json(

@@ -32,7 +32,7 @@ Deno.serve(async (req) => {
   // Read once. If absent, insert with a generated code and re-read.
   const existing = await admin
     .from("consumers")
-    .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
+    .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
     .eq("id", userId)
     .maybeSingle();
   if (existing.error) {
@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
       const inserted = await admin
         .from("consumers")
         .insert({ id: userId, code: codeResult.data as string })
-        .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
+        .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
         .single();
       if (!inserted.error) {
         consumer = inserted.data;
@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
       .from("consumers")
       .update({ code: codeResult.data as string })
       .eq("id", userId)
-      .select("id, code, full_name, sex, birthday, country, phone, cashback_balance_cents")
+      .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
       .single();
     if (updated.error) {
       return json({ ok: false, error: `consumer_code_set: ${updated.error.message}` }, 500);

@@ -17,7 +17,12 @@ import {
 import { clean } from "../_shared/input.ts";
 
 type Body = {
+  // Legacy single-field name. Still accepted so older clients keep
+  // working. New clients should send first_name + last_name; this EF
+  // joins them to repopulate full_name for downstream readers.
   full_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
   sex?: string | null;
   birthday?: string | null;
   country?: string | null;
@@ -43,7 +48,14 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
 
-  const fullName = clean(body.full_name, 120);
+  const firstName = clean(body.first_name, 60);
+  const lastName = clean(body.last_name, 60);
+  // Derive full_name from first + last when either was sent. Falls
+  // back to body.full_name for legacy clients that still pass it.
+  const fullName =
+    body.first_name !== undefined || body.last_name !== undefined
+      ? [firstName, lastName].filter(Boolean).join(" ") || null
+      : clean(body.full_name, 120);
   const country = clean(body.country, 64);
   const phone = clean(body.phone, 32);
   const sexRaw = clean(body.sex, 16);
@@ -101,9 +113,19 @@ Deno.serve(async (req) => {
   }
 
   // Build a patch with only the fields the caller actually sent. Avoids
-  // null-clobbering values they didn't intend to touch.
+  // null-clobbering values they didn't intend to touch. When the client
+  // sends first_name and/or last_name, full_name is also updated to
+  // the joined version so downstream readers keep working.
   const patch: Record<string, unknown> = {};
-  if (body.full_name !== undefined) patch.full_name = fullName;
+  if (body.first_name !== undefined) patch.first_name = firstName;
+  if (body.last_name !== undefined) patch.last_name = lastName;
+  if (
+    body.first_name !== undefined ||
+    body.last_name !== undefined ||
+    body.full_name !== undefined
+  ) {
+    patch.full_name = fullName;
+  }
   if (body.sex !== undefined) patch.sex = sex;
   if (body.birthday !== undefined) patch.birthday = birthday;
   if (body.country !== undefined) patch.country = country;
@@ -118,7 +140,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", userId)
     .select(
-      "id, code, full_name, sex, birthday, country, phone, cashback_balance_cents",
+      "id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents",
     )
     .single();
   if (update.error) {
