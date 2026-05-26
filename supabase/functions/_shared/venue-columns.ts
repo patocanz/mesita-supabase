@@ -17,6 +17,12 @@ const COLUMNS: readonly string[] = [
   "category",
   "vibe",
   "price_level",
+  // ISO 4217 code (default MXN). Every monetary amount on a venue —
+  // price ranges shown on the consumer detail page, reward caps,
+  // future cover charges — is denominated in this currency so the
+  // client can render the right prefix ("MX$", "$", "€") without
+  // hard-coding it.
+  "currency",
   "listing_type",
   "status",
   "fiscal_type",

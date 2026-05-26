@@ -31,6 +31,10 @@ type UpdateBody = {
   category?: string | null;
   vibe?: string | null;
   price_level?: number | null;
+  // ISO 4217 code. Mesita defaults every venue to MXN; the business
+  // can switch to USD/EUR/etc. only when we extend coverage outside
+  // Mexico. Kept as text so the EF doesn't hard-code an enum.
+  currency?: string | null;
   status?: "active" | "paused" | "archived";
   fiscal_type?: "formal" | "informal";
   plan?:
@@ -200,6 +204,13 @@ Deno.serve(async (req) => {
   if ("category" in body) update.category = optString(body.category, 80);
   if ("vibe" in body) update.vibe = optString(body.vibe, 80);
   if ("price_level" in body) update.price_level = body.price_level == null ? null : clampInt(body.price_level, 1, 4);
+  // currency: ISO 4217 uppercase code, 3 chars. Reject anything else
+  // — accidental empty strings or longer strings would corrupt every
+  // monetary render downstream.
+  if ("currency" in body) {
+    const c = (body.currency ?? "").toString().trim().toUpperCase();
+    if (c.length === 3 && /^[A-Z]{3}$/.test(c)) update.currency = c;
+  }
   if ("status" in body) {
     const s = body.status;
     if (!s || !EDITABLE_STATUSES.has(s)) {
