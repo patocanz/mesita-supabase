@@ -24,7 +24,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
-import { VENUE_PUBLIC_COLUMNS as VENUE_COLUMNS } from "../_shared/venue-columns.ts";
 import {
   EMBEDDING_DIMS,
   embedAndPersistVenues,
@@ -32,6 +31,7 @@ import {
   rankByCosine,
   shouldEmbed,
 } from "../_shared/embeddings.ts";
+import { fetchCandidatePool } from "../_shared/recommender-pool.ts";
 
 const CANDIDATE_POOL = 300;
 const DEFAULT_RADIUS_KM = 25;
@@ -92,35 +92,16 @@ Deno.serve(async (req) => {
   });
 
   // ── 1. Candidate pool ──────────────────────────────────────────────
-  let candidates: VenueRow[];
-  if (lat != null && lng != null) {
-    const latDelta = radiusKm / 111;
-    const lngDelta = radiusKm / (111 * Math.max(0.1, Math.cos((lat * Math.PI) / 180)));
-    const { data, error } = await admin
-      .from("venues")
-      .select(VENUE_COLUMNS + ", embedding, embedding_source_hash")
-      .eq("status", "active")
-      .gte("lat", lat - latDelta)
-      .lte("lat", lat + latDelta)
-      .gte("lng", lng - lngDelta)
-      .lte("lng", lng + lngDelta)
-      .limit(CANDIDATE_POOL);
-    if (error) return json({ ok: false, error: `candidate_pool: ${error.message}` }, 500);
-    candidates = (data ?? []) as VenueRow[];
-  } else {
-    const { data, error } = await admin
-      .from("venues")
-      .select(VENUE_COLUMNS + ", embedding, embedding_source_hash")
-      .eq("status", "active")
-      .order("created_at", { ascending: false })
-      .limit(CANDIDATE_POOL);
-    if (error) return json({ ok: false, error: `candidate_pool: ${error.message}` }, 500);
-    candidates = (data ?? []) as VenueRow[];
+  const poolRes = await fetchCandidatePool<VenueRow>(admin, {
+    lat,
+    lng,
+    radiusKm,
+    poolSize: CANDIDATE_POOL,
+  });
+  if (!poolRes.ok) {
+    return json({ ok: false, error: `candidate_pool: ${poolRes.error}` }, 500);
   }
-
-  if (lat != null && lng != null) {
-    candidates = candidates.filter((v) => haversineKm(lat, lng, v.lat, v.lng) <= radiusKm);
-  }
+  const candidates = poolRes.rows;
   if (candidates.length === 0) {
     return json({ ok: true, categories: [], summary: { candidates: 0 } });
   }
@@ -413,21 +394,8 @@ function pickEmoji(raw: unknown): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Geo + misc
+// Misc
 // ─────────────────────────────────────────────────────────────────────
-
-function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: number | null): number {
-  if (lat2 == null || lng2 == null) return Number.POSITIVE_INFINITY;
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
-}
 
 async function fetchConsumerProfile(
   client: ReturnType<typeof createClient>,

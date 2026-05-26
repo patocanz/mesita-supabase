@@ -22,13 +22,13 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
-import { VENUE_PUBLIC_COLUMNS as VENUE_COLUMNS } from "../_shared/venue-columns.ts";
 import {
   embedAndPersistVenues,
   embedSingle,
   rankByCosine,
   shouldEmbed,
 } from "../_shared/embeddings.ts";
+import { fetchCandidatePool } from "../_shared/recommender-pool.ts";
 
 // Pool sizing — overfetch beyond `limit` so diversity trimming has slack.
 const CANDIDATE_POOL = 200;
@@ -92,36 +92,18 @@ Deno.serve(async (req) => {
   });
 
   // ── 1. Candidate pool ──────────────────────────────────────────────
-  // Bounding-box prefilter. ~111km per degree latitude; longitude shrinks
-  // with cos(lat) so we widen the lng span accordingly. This is a coarse
-  // filter — we trim by exact haversine in JS after ranking.
-  let candidates: VenueRow[];
-  if (lat != null && lng != null) {
-    const latDelta = radiusKm / 111;
-    const lngDelta = radiusKm / (111 * Math.max(0.1, Math.cos((lat * Math.PI) / 180)));
-    const { data, error } = await admin
-      .from("venues")
-      .select(VENUE_COLUMNS + ", embedding, embedding_source_hash")
-      .eq("status", "active")
-      .gte("lat", lat - latDelta)
-      .lte("lat", lat + latDelta)
-      .gte("lng", lng - lngDelta)
-      .lte("lng", lng + lngDelta)
-      .limit(CANDIDATE_POOL);
-    if (error) return json({ ok: false, error: `candidate_pool: ${error.message}` }, 500);
-    candidates = (data ?? []) as VenueRow[];
-  } else {
-    // No location → newest active venues. We still embed-rank below.
-    const { data, error } = await admin
-      .from("venues")
-      .select(VENUE_COLUMNS + ", embedding, embedding_source_hash")
-      .eq("status", "active")
-      .order("created_at", { ascending: false })
-      .limit(CANDIDATE_POOL);
-    if (error) return json({ ok: false, error: `candidate_pool: ${error.message}` }, 500);
-    candidates = (data ?? []) as VenueRow[];
+  // fetchCandidatePool also haversine-trims by radius — bounding-box
+  // alone is coarse at higher latitudes.
+  const poolRes = await fetchCandidatePool<VenueRow>(admin, {
+    lat,
+    lng,
+    radiusKm,
+    poolSize: CANDIDATE_POOL,
+  });
+  if (!poolRes.ok) {
+    return json({ ok: false, error: `candidate_pool: ${poolRes.error}` }, 500);
   }
-
+  const candidates = poolRes.rows;
   if (candidates.length === 0) {
     return json({ ok: true, deck: [], summary: { candidates: 0, embedded: 0 } });
   }
@@ -171,10 +153,8 @@ Deno.serve(async (req) => {
     ranked = fallbackRank(candidates);
   }
 
-  // ── 5. Radius + diversity + partner-first trim ─────────────────────
-  if (lat != null && lng != null) {
-    ranked = ranked.filter((v) => haversineKm(lat, lng, v.lat, v.lng) <= radiusKm);
-  }
+  // ── 5. Diversity + partner-first trim ──────────────────────────────
+  // (radius trim already happened inside fetchCandidatePool)
   const deck = diversify(ranked, limit, MAX_PER_CATEGORY);
 
   return json({
@@ -317,23 +297,6 @@ function diversify(rows: VenueRow[], limit: number, perCategory: number): VenueR
     out.push(r);
   }
   return out;
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Geo helpers
-// ─────────────────────────────────────────────────────────────────────
-
-function haversineKm(lat1: number, lng1: number, lat2: number | null, lng2: number | null): number {
-  if (lat2 == null || lng2 == null) return Number.POSITIVE_INFINITY;
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
 // ─────────────────────────────────────────────────────────────────────
