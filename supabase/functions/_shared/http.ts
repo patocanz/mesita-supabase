@@ -1,7 +1,7 @@
 // HTTP helpers shared by all Mesita Edge Functions: JSON response builder
 // + the canonical OPTIONS pre-flight handler. Pure utilities; no DB calls,
-// no fetches, no auth — safe to import from any EF without breaking the
-// "self-contained" rule.
+// no fetches, no auth — safe to import from any natural-caller or
+// artificial-caller EF.
 
 import { CORS } from "./cors.ts";
 

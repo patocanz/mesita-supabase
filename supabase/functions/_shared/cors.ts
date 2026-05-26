@@ -2,12 +2,6 @@
 // origin is intentional — these EFs are called from web, native, and
 // future partner contexts, and we authenticate per-request via the
 // bearer/anon token rather than relying on the Origin header.
-//
-// Per the project rule "Edge Functions are self-contained, no
-// function-to-function calls", importing pure utilities from a sibling
-// module under _shared/ is fine — Supabase deploys each function with
-// the files it imports, and there's no runtime function-to-function
-// composition. This file is just shared source.
 
 export const CORS = {
   "Access-Control-Allow-Origin": "*",
