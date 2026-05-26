@@ -84,6 +84,8 @@ type UpdateBody = {
   // Place-redesign editable surface (Business-E=YES on the Components spec).
   description?: string | null;
   menu_pdf_url?: string | null;
+  // Optional human label paired with menu_pdf_url. Null clears.
+  menu_pdf_name?: string | null;
   tags?: string[];
   whatsapp_pr_urls?: string[];
   instagram_pr_urls?: string[];
@@ -360,6 +362,9 @@ Deno.serve(async (req) => {
     } else {
       update.menu_pdf_url = raw.trim();
     }
+  }
+  if ("menu_pdf_name" in body) {
+    update.menu_pdf_name = optString(body.menu_pdf_name, 80);
   }
   if ("tags" in body) {
     if (!Array.isArray(body.tags)) {
