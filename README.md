@@ -20,10 +20,10 @@ supabase/
 ├── functions/
 │   ├── _shared/             # Pure utilities imported by EFs (no fn-to-fn calls at runtime)
 │   ├── admin-*/             # Admin console flows (super-admin gated)
-│   ├── guest-*/             # B2C diner flows
-│   ├── business-*/           # B2B venue business flows
+│   ├── consumer-*/          # B2C diner flows
+│   ├── business-*/          # B2B venue business flows
 │   └── staff-*/             # WhatsApp validator (waiter) flows
-├── migrations/              # Versioned SQL migrations (0001 … 0020)
+├── migrations/              # Versioned SQL migrations (0001 … 0025)
 └── seed.sql                 # Idempotent local seed
 ```
 
@@ -49,7 +49,7 @@ supabase functions deploy <function-name> [<function-name> ...]
 |---|---|---|
 | `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset |
 | `business-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
-| `guest-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
+| `consumer-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
 | `staff-*` | phone OTP (post-invite) | WhatsApp validator flows |
 
 `_shared/` holds pure imports (HTTP/CORS helpers, env+auth wrappers, role catalog, token generator). It is **not** a runtime dependency — Supabase bundles imported source per-function at deploy time, so the "no function-to-function calls" rule is still honored.
@@ -57,10 +57,10 @@ supabase functions deploy <function-name> [<function-name> ...]
 ## Schema highlights
 
 - **`venues`** — the catalog. Status: `lead | active | paused | archived`. Listing type: `partner | web`.
-- **`venue_members`** — businesses ↔ venues with role `owner | business | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
+- **`venue_members`** — businesses ↔ venues with role `owner | editor | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
 - **`venue_roles`** — newer phone-pool roles (`staff | business`) bound directly to `auth.users`.
 - **`staff_invites` / `business_invites`** — token-based pending invitations.
-- **`tickets`** — guest tickets with status / story / reservation / cashback / discount columns.
+- **`tickets`** — consumer tickets with status / story / reservation / cashback / discount columns.
 - **`super_admins`** — allow-list bypass for the admin console.
 
 **RLS is tight:** SELECT only for rows the caller is permitted to see; all writes go through the service role inside Edge Functions.

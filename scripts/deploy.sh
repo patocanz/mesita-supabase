@@ -8,7 +8,7 @@
 #
 # Edge Functions are deployed individually (or via `supabase functions
 # deploy <name>`) when their code actually changes — we don't redeploy
-# all 49 on every push. The deploy step lives in CI / per-EF commits.
+# all 52 on every push. The deploy step lives in CI / per-EF commits.
 
 set -euo pipefail
 

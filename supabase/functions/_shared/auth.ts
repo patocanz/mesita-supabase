@@ -108,12 +108,16 @@ export function adminClient(env: EFEnv): SupabaseClient {
 
 // ─── Membership ─────────────────────────────────────────────────────
 
-export type MembershipRole = "owner" | "business" | "viewer" | "staff";
+// Mirrors the public.member_role enum (see migration 0025). 'staff' is
+// legacy — only present on venue_members rows created before venue_roles
+// existed; the Team UI speaks owner / editor / viewer.
+export type MembershipRole = "owner" | "editor" | "viewer" | "staff";
 
 export type Membership = {
   isSuperAdmin: boolean;
-  // The venue_members.role for businesses, or "staff" for super-admins
-  // who landed without a row — owners write access either way.
+  // The venue_members.role for the caller, or null when the caller has
+  // no membership row (super-admins land here too — owners write access
+  // either way via the isSuperAdmin flag).
   role: MembershipRole | null;
 };
 

@@ -16,8 +16,7 @@
 // is picky about city qualifiers, accents, etc.). Each prediction
 // carries a `status` so the UI can render the right per-row badge
 // (not_in_mesita / web_listed / verified_partner_other /
-// verified_partner_self). `inMesita` is kept for backwards-compat with
-// the old frontend; new code should branch on `status`.
+// verified_partner_self).
 //
 // IMPORTANT: this function always returns HTTP 200, even on Google
 // failures. supabase-js's `functions.invoke` swallows the response body

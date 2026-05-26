@@ -63,12 +63,12 @@ Deno.serve(async (req) => {
     );
   }
 
-  const { data: existingMgr } = await admin
+  const { data: existingBusiness } = await admin
     .from("businesses")
     .select("id")
     .eq("id", user.id)
     .maybeSingle();
-  if (!existingMgr) {
+  if (!existingBusiness) {
     const ins = await admin.from("businesses").insert({
       id: user.id,
       email: user.emailLower,

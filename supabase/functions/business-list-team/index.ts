@@ -47,7 +47,7 @@ Deno.serve(async (req) => {
 
   // Four independent reads in parallel — no further fan-out except
   // for the waiter phone lookups below.
-  const [mgrRows, roleRows, pendingMgrRows, pendingWaiterRows] = await Promise.all([
+  const [memberRows, roleRows, pendingBusinessRows, pendingWaiterRows] = await Promise.all([
     admin
       .from("venue_members")
       .select("id, role, created_at, business:businesses(id, full_name, email)")
@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
       .order("created_at", { ascending: false }),
   ]);
 
-  for (const r of [mgrRows, roleRows, pendingMgrRows, pendingWaiterRows]) {
+  for (const r of [memberRows, roleRows, pendingBusinessRows, pendingWaiterRows]) {
     if (r.error) {
       return json({ ok: false, error: `read: ${r.error.message}` }, 500);
     }
@@ -87,7 +87,7 @@ Deno.serve(async (req) => {
     created_at: string;
     business: { id: string; full_name: string | null; email: string | null } | null;
   };
-  const businesses = ((mgrRows.data ?? []) as BusinessJoin[])
+  const businesses = ((memberRows.data ?? []) as BusinessJoin[])
     .filter((r) => r.business != null)
     .map((r) => ({
       memberId: r.id,
@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
 
   const waiters = await loadWaitersWithPhones(admin, roleRows.data ?? []);
 
-  const pendingBusinessInvites = (pendingMgrRows.data ?? []).map((r) => ({
+  const pendingBusinessInvites = (pendingBusinessRows.data ?? []).map((r) => ({
     id: r.id,
     email: r.email,
     role: r.role,
