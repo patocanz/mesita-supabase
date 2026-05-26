@@ -18,7 +18,7 @@ PROJECT_REF="yjalywfzdelacdzccpgb"
 # Add new consumer repos here as they appear.
 WEB_REPOS=(
   "../mesita-web-business"
-  "../mesita-web-guest"
+  "../mesita-web-consumer"
   "../mesita-web-admin"
 )
 

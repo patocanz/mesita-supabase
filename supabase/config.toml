@@ -48,7 +48,7 @@ enable_anonymous_sign_ins = false
 # enrol if they want. Admin-side enforcement lives in admin-signin-email.
 enable_manual_linking = false
 
-# Email — password only. No magic link, no email OTP. Guests don't get
+# Email — password only. No magic link, no email OTP. Consumers don't get
 # email auth at all; business + admin live here.
 [auth.email]
 enable_signup = true
@@ -59,7 +59,7 @@ max_frequency = "1s"
 otp_length = 6
 otp_expiry = 3600
 
-# Phone — Twilio Verify, Mexico template at signup. Guests + staff sign
+# Phone — Twilio Verify, Mexico template at signup. Consumers + staff sign
 # in here; businesses + admins never see this provider.
 [auth.sms]
 enable_signup = true
@@ -97,67 +97,65 @@ s3_region = "env(S3_REGION)"
 s3_access_key = "env(S3_ACCESS_KEY)"
 s3_secret_key = "env(S3_SECRET_KEY)"
 
-# Per-function overrides. Naming rule: who-verb-nouns (e.g. business-create-unit,
-# guest-list-tickets). All functions verify the JWT except the truly public
-# catalog reads, which rely on RLS to gate visibility instead.
+# Per-function overrides. Naming rule: <caller>-<verb>-<noun> (e.g.
+# business-create-unit, consumer-list-tickets). All functions verify the
+# JWT except the truly public catalog reads, which rely on RLS to gate
+# visibility instead.
+
+# --- Sign-in / accept-invite (post-signin housekeeping per role) ---
 #
-# --- Auth (post-signin housekeeping per role) ---
-
-# Sign-in EFs run AFTER the Supabase Auth call lands a session. They set
+# These run AFTER the Supabase Auth call lands a session. They set
 # app_metadata.role, create the corresponding profile row, and (admin)
-# enforce @canzeco.com + MFA. verify_jwt=true gates each to a real session.
+# enforce @canzeco.com + MFA. verify_jwt = true gates each to a real
+# session.
 
-[functions.guest-signin-phone]
-verify_jwt = true
-
-[functions.staff-accept-invite]
+[functions.admin-signin-email]
 verify_jwt = true
 
 [functions.business-signin-email]
 verify_jwt = true
 
-[functions.admin-signin-email]
+[functions.consumer-signin-phone]
 verify_jwt = true
 
-# Tiny session-check used by the admin web's app shell.
-[functions.admin-whoami]
+[functions.business-accept-invite]
 verify_jwt = true
 
-# Ownership-verification queue surface for super-admins.
-[functions.admin-list-verifications]
+[functions.staff-accept-invite]
 verify_jwt = true
 
-[functions.admin-decide-verification]
-verify_jwt = true
-
-[functions.admin-set-auto-verify]
-verify_jwt = true
-
-# DESTRUCTIVE full reset. Gated on super_admins + a typed "RESET"
-# confirmation. Wipes all data, keeps the super-admin allowlist.
-[functions.admin-reset-database]
-verify_jwt = true
-
-# --- Guest (public reads + authed writes) ---
+# --- Consumer (public reads + authed writes) ---
 
 # Public catalog reads. RLS enforces which venue statuses are visible.
-[functions.guest-list-venues]
+[functions.consumer-list-venues]
 verify_jwt = false
 
-[functions.guest-get-venue]
+[functions.consumer-get-venue]
 verify_jwt = false
 
-# Authed guest writes / reads tied to the signed-in guest's own data.
-[functions.guest-get-profile]
+# Personalised discovery surfaces. JWT required so we can read the
+# consumer's class + history; the recommendation logic still respects
+# RLS for venue visibility.
+[functions.consumer-recommend-catalog]
 verify_jwt = true
 
-[functions.guest-update-profile]
+[functions.consumer-recommend-deck]
 verify_jwt = true
 
-[functions.guest-list-tickets]
+# Authed consumer writes / reads tied to the signed-in consumer's own data.
+[functions.consumer-get-profile]
 verify_jwt = true
 
-[functions.guest-submit-story]
+[functions.consumer-update-profile]
+verify_jwt = true
+
+[functions.consumer-list-tickets]
+verify_jwt = true
+
+[functions.consumer-submit-story]
+verify_jwt = true
+
+[functions.consumer-delete-account]
 verify_jwt = true
 
 # --- Business (all authed) ---
@@ -179,16 +177,28 @@ verify_jwt = true
 [functions.business-update-unit]
 verify_jwt = true
 
-# Ownership-verification submit + status-poll, called from /add on
-# business.mesita.ai. business-verify-call-code is phase 2 of the
-# ai_call OTP flow (business-submit-verification generates the code).
-[functions.business-submit-verification]
+[functions.business-delete-unit]
 verify_jwt = true
 
+# Ownership-verification submit + status-poll, called from /add on
+# business.mesita.ai.
 [functions.business-get-verification]
 verify_jwt = true
 
-[functions.business-verify-call-code]
+[functions.business-requests-manual-review]
+verify_jwt = true
+
+# Email / phone OTP flow for ownership verification.
+[functions.business-sends-email-otp]
+verify_jwt = true
+
+[functions.business-verifies-email]
+verify_jwt = true
+
+[functions.business-sends-phone-otp]
+verify_jwt = true
+
+[functions.business-verifies-phone]
 verify_jwt = true
 
 # State-aware Place ID → Mesita venue lookup. Powers the /add page's
@@ -217,7 +227,7 @@ verify_jwt = true
 [functions.business-verify-story]
 verify_jwt = true
 
-# Guest lookup at the table (resolve 6-char code → name + balance).
+# Consumer lookup at the table (resolve 6-char code → name + balance).
 [functions.business-find-consumer]
 verify_jwt = true
 
@@ -228,11 +238,44 @@ verify_jwt = true
 [functions.business-get-place]
 verify_jwt = true
 
+# Team management — owner / editor / viewer tier + waiters.
+[functions.business-list-team]
+verify_jwt = true
+
+[functions.business-invite-business]
+verify_jwt = true
+
+[functions.business-invite-waiter]
+verify_jwt = true
+
+[functions.business-remove-member]
+verify_jwt = true
+
+[functions.business-update-member-role]
+verify_jwt = true
+
+[functions.business-test-waiter-channel]
+verify_jwt = true
+
 # --- Admin (Supabase Auth + super_admins allowlist) ---
 #
 # Operators sign in as themselves (Google OAuth via the admin web).
 # Each EF re-checks the caller's JWT email against public.super_admins
 # before doing anything privileged.
+
+# Tiny session-check used by the admin web's app shell.
+[functions.admin-whoami]
+verify_jwt = true
+
+# Ownership-verification queue surface for super-admins.
+[functions.admin-list-verifications]
+verify_jwt = true
+
+[functions.admin-decide-verification]
+verify_jwt = true
+
+[functions.admin-set-auto-verify]
+verify_jwt = true
 
 # Bulk Google Places Text Search proxy. Many queries in, deduped
 # Place IDs out.
@@ -242,4 +285,21 @@ verify_jwt = true
 # Resolve a Google Place ID to a Mesita venue. Powers the admin
 # console's "open in business" link generator.
 [functions.admin-find-venue]
+verify_jwt = true
+
+# DESTRUCTIVE full reset. Gated on super_admins + a typed "RESET"
+# confirmation. Wipes all data, keeps the super-admin allowlist.
+[functions.admin-reset-database]
+verify_jwt = true
+
+# Atlas operations — venue profile research + enrichment, owned by
+# admins. Reads/writes the Atlas Storage bucket; see the Atlas concept
+# notes for the snapshot model.
+[functions.admin-get-settings]
+verify_jwt = true
+
+[functions.admin-set-atlas-pre-read]
+verify_jwt = true
+
+[functions.admin-snapshot-mesita]
 verify_jwt = true
