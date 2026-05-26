@@ -23,6 +23,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { VENUE_PUBLIC_COLUMNS as VENUE_COLUMNS } from "../_shared/venue-columns.ts";
+import {
+  embedAndPersistVenues,
+  embedSingle,
+  rankByCosine,
+  shouldEmbed,
+} from "../_shared/embeddings.ts";
 
 // Pool sizing — overfetch beyond `limit` so diversity trimming has slack.
 const CANDIDATE_POOL = 200;
@@ -31,9 +37,6 @@ const MAX_PER_CATEGORY = 4; // diversity cap inside the final deck
 const DEFAULT_LIMIT = 20;
 const DEFAULT_RADIUS_KM = 25;
 const LAZY_EMBED_BATCH = 50;
-
-const EMBEDDING_MODEL = "text-embedding-3-small";
-const EMBEDDING_DIMS = 1536;
 
 type Body = {
   lat?: number;
@@ -129,7 +132,12 @@ Deno.serve(async (req) => {
   const needsEmbed = candidates.filter(shouldEmbed).slice(0, LAZY_EMBED_BATCH);
   let embeddedCount = 0;
   if (needsEmbed.length > 0 && OPENAI_KEY) {
-    const patched = await embedAndPersist(needsEmbed, admin, OPENAI_KEY);
+    const patched = await embedAndPersistVenues(
+      needsEmbed,
+      admin,
+      OPENAI_KEY,
+      "consumer-recommend-deck",
+    );
     embeddedCount = patched.size;
     for (const c of candidates) {
       const p = patched.get(c.id);
@@ -153,7 +161,7 @@ Deno.serve(async (req) => {
   let ranked: VenueRow[];
   if (OPENAI_KEY) {
     try {
-      const intentVec = await embed(intent, OPENAI_KEY);
+      const intentVec = await embedSingle(intent, OPENAI_KEY);
       ranked = rankByCosine(candidates, intentVec);
     } catch (err) {
       console.error("[consumer-recommend-deck] intent embed failed:", err);
@@ -274,162 +282,8 @@ function topCategoriesIn(rows: VenueRow[], k: number): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Embedding helpers
-// ─────────────────────────────────────────────────────────────────────
-
-function venueSourceText(v: VenueRow): string {
-  const lines: string[] = [];
-  lines.push(`Name: ${v.name}`);
-  if (v.category) lines.push(`Category: ${v.category}`);
-  if (v.vibe) lines.push(`Vibe: ${v.vibe}`);
-  if (v.pitch) lines.push(`Pitch: ${v.pitch}`);
-  if (v.story) lines.push(`Story: ${v.story.slice(0, 700)}`);
-  if (v.address) lines.push(`Address: ${v.address}`);
-  if (v.price_level != null) lines.push(`Price level: ${v.price_level}/4`);
-  return lines.join("\n");
-}
-
-// Cheap stable digest of the source text — used so we can detect "this
-// venue's text changed, re-embed" without storing the whole text.
-async function digest(text: string): Promise<string> {
-  const buf = new TextEncoder().encode(text);
-  const hash = await crypto.subtle.digest("SHA-1", buf);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 32);
-}
-
-function shouldEmbed(v: VenueRow): boolean {
-  if (!v.embedding) return true;
-  // We re-derive the source text and compare hashes on every read — cheap
-  // (sha1 over <1KB) and lets edits flow into the index without manual
-  // backfill.
-  return v.embedding_source_hash == null;
-}
-
-// Returns a map of venue.id → { embedding, hash } for every row that was
-// successfully embedded + persisted. The caller patches local rows from
-// this map so we never need a re-SELECT after writing.
-async function embedAndPersist(
-  rows: VenueRow[],
-  admin: ReturnType<typeof createClient>,
-  apiKey: string,
-): Promise<Map<string, { embedding: number[]; hash: string }>> {
-  // venueSourceText() is called once per row — hashing the same text is
-  // cheap but venueSourceText itself isn't free, and we'd otherwise call
-  // it twice (once for the OpenAI input, once for the hash).
-  const inputs = await Promise.all(rows.map(async (r) => {
-    const text = venueSourceText(r);
-    return { id: r.id, text, hash: await digest(text) };
-  }));
-
-  const out = new Map<string, { embedding: number[]; hash: string }>();
-  try {
-    const r = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: inputs.map((i) => i.text),
-      }),
-    });
-    if (!r.ok) {
-      const errText = (await r.text()).slice(0, 240);
-      console.error("[consumer-recommend-deck] batch-embed HTTP", r.status, errText);
-      return out;
-    }
-    const data = (await r.json()) as {
-      data?: { embedding: number[]; index: number }[];
-    };
-    const byIdx = new Map<number, number[]>();
-    for (const d of data.data ?? []) byIdx.set(d.index, d.embedding);
-
-    // Persist in parallel — N updates fan out concurrently instead of
-    // serialising. supabase-js queues at the HTTP layer; PostgREST is fine
-    // with 50 concurrent single-row updates.
-    await Promise.all(inputs.map(async (inp, i) => {
-      const v = byIdx.get(i);
-      if (!v || v.length !== EMBEDDING_DIMS) return;
-      const { error } = await admin
-        .from("venues")
-        .update({
-          embedding: vectorLiteral(v),
-          embedding_source_hash: inp.hash,
-        })
-        .eq("id", inp.id);
-      if (error) {
-        console.error("[consumer-recommend-deck] embed write:", error.message);
-        return;
-      }
-      out.set(inp.id, { embedding: v, hash: inp.hash });
-    }));
-    return out;
-  } catch (err) {
-    console.error("[consumer-recommend-deck] embed exception:", err);
-    return out;
-  }
-}
-
-async function embed(text: string, apiKey: string): Promise<number[]> {
-  const r = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
-  });
-  if (!r.ok) throw new Error(`embed HTTP ${r.status}`);
-  const data = (await r.json()) as { data?: { embedding: number[] }[] };
-  const v = data.data?.[0]?.embedding;
-  if (!v || v.length !== EMBEDDING_DIMS) throw new Error("embed: bad shape");
-  return v;
-}
-
-// pgvector accepts vectors as text literals like "[0.01,0.02,...]". We
-// build that here so the .update() call sends a plain string (supabase-js
-// doesn't have a vector binder).
-function vectorLiteral(v: number[]): string {
-  return `[${v.map((x) => x.toFixed(6)).join(",")}]`;
-}
-
-// ─────────────────────────────────────────────────────────────────────
 // Ranking
 // ─────────────────────────────────────────────────────────────────────
-
-// Cosine similarity between two vectors that are already normalised
-// approximately (text-embedding-3-small returns unit-length vectors).
-function cosineSim(a: number[], b: number[]): number {
-  let dot = 0;
-  for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
-  return dot;
-}
-
-function parseVector(v: unknown): number[] | null {
-  // Fast path: pgvector via supabase-js may arrive already typed when the
-  // row was patched locally from our embed call. Avoids the split + parse.
-  if (Array.isArray(v)) return v as number[];
-  if (typeof v !== "string") return null;
-  const inner = v.slice(v.startsWith("[") ? 1 : 0, v.endsWith("]") ? -1 : undefined);
-  if (!inner) return null;
-  const arr = inner.split(",").map((s) => Number(s));
-  for (const n of arr) if (!Number.isFinite(n)) return null;
-  return arr;
-}
-
-function rankByCosine(rows: VenueRow[], queryVec: number[]): VenueRow[] {
-  const scored = rows.map((r) => {
-    const v = parseVector(r.embedding);
-    const score = v ? cosineSim(v, queryVec) : -1; // no embedding → tail
-    return { row: r, score };
-  });
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map((s) => s.row);
-}
 
 function fallbackRank(rows: VenueRow[]): VenueRow[] {
   // Partner-first, then newest. Stable when OpenAI is down.

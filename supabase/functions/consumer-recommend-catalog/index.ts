@@ -25,6 +25,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { VENUE_PUBLIC_COLUMNS as VENUE_COLUMNS } from "../_shared/venue-columns.ts";
+import {
+  EMBEDDING_DIMS,
+  embedAndPersistVenues,
+  embedBatch,
+  rankByCosine,
+  shouldEmbed,
+} from "../_shared/embeddings.ts";
 
 const CANDIDATE_POOL = 300;
 const DEFAULT_RADIUS_KM = 25;
@@ -34,8 +41,6 @@ const MAX_PER_CATEGORY_CAP = 20;
 const LAZY_EMBED_BATCH = 80;
 const MAX_VENUE_REUSE = 2; // how many categories a single venue may appear in
 
-const EMBEDDING_MODEL = "text-embedding-3-small";
-const EMBEDDING_DIMS = 1536;
 const CATEGORY_MODEL = "gpt-4o-mini";
 
 type Body = {
@@ -124,7 +129,12 @@ Deno.serve(async (req) => {
   const needsEmbed = candidates.filter(shouldEmbed).slice(0, LAZY_EMBED_BATCH);
   let embeddedCount = 0;
   if (needsEmbed.length > 0 && OPENAI_KEY) {
-    const patched = await embedAndPersist(needsEmbed, admin, OPENAI_KEY);
+    const patched = await embedAndPersistVenues(
+      needsEmbed,
+      admin,
+      OPENAI_KEY,
+      "consumer-recommend-catalog",
+    );
     embeddedCount = patched.size;
     for (const c of candidates) {
       const p = patched.get(c.id);
@@ -400,138 +410,6 @@ function pickEmoji(raw: unknown): string {
   const it = raw[Symbol.iterator]();
   const first = it.next();
   return first.done ? "✨" : (first.value as string);
-}
-
-// ─────────────────────────────────────────────────────────────────────
-// Embedding helpers (mirrors consumer-recommend-deck — kept inline so each EF
-// stays self-contained per the "no function-to-function calls" rule)
-// ─────────────────────────────────────────────────────────────────────
-
-function venueSourceText(v: VenueRow): string {
-  const lines: string[] = [];
-  lines.push(`Name: ${v.name}`);
-  if (v.category) lines.push(`Category: ${v.category}`);
-  if (v.vibe) lines.push(`Vibe: ${v.vibe}`);
-  if (v.pitch) lines.push(`Pitch: ${v.pitch}`);
-  if (v.story) lines.push(`Story: ${v.story.slice(0, 700)}`);
-  if (v.address) lines.push(`Address: ${v.address}`);
-  if (v.price_level != null) lines.push(`Price level: ${v.price_level}/4`);
-  return lines.join("\n");
-}
-
-async function digest(text: string): Promise<string> {
-  const buf = new TextEncoder().encode(text);
-  const hash = await crypto.subtle.digest("SHA-1", buf);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("")
-    .slice(0, 32);
-}
-
-function shouldEmbed(v: VenueRow): boolean {
-  if (!v.embedding) return true;
-  return v.embedding_source_hash == null;
-}
-
-// Returns a map of venue.id → { embedding, hash } for every row that was
-// successfully embedded + persisted. The caller patches local rows from
-// this map so we never need a re-SELECT after writing.
-async function embedAndPersist(
-  rows: VenueRow[],
-  admin: ReturnType<typeof createClient>,
-  apiKey: string,
-): Promise<Map<string, { embedding: number[]; hash: string }>> {
-  const inputs = await Promise.all(rows.map(async (r) => {
-    const text = venueSourceText(r);
-    return { id: r.id, text, hash: await digest(text) };
-  }));
-  const out = new Map<string, { embedding: number[]; hash: string }>();
-  try {
-    const r = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: inputs.map((i) => i.text),
-      }),
-    });
-    if (!r.ok) {
-      console.error("[consumer-recommend-catalog] batch-embed HTTP", r.status, (await r.text()).slice(0, 240));
-      return out;
-    }
-    const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
-    const byIdx = new Map<number, number[]>();
-    for (const d of data.data ?? []) byIdx.set(d.index, d.embedding);
-
-    await Promise.all(inputs.map(async (inp, i) => {
-      const v = byIdx.get(i);
-      if (!v || v.length !== EMBEDDING_DIMS) return;
-      const { error } = await admin
-        .from("venues")
-        .update({
-          embedding: vectorLiteral(v),
-          embedding_source_hash: inp.hash,
-        })
-        .eq("id", inp.id);
-      if (error) {
-        console.error("[consumer-recommend-catalog] embed write:", error.message);
-        return;
-      }
-      out.set(inp.id, { embedding: v, hash: inp.hash });
-    }));
-    return out;
-  } catch (err) {
-    console.error("[consumer-recommend-catalog] embed exception:", err);
-    return out;
-  }
-}
-
-async function embedBatch(texts: string[], apiKey: string): Promise<number[][]> {
-  const r = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
-  });
-  if (!r.ok) throw new Error(`embedBatch HTTP ${r.status}`);
-  const data = (await r.json()) as { data?: { embedding: number[]; index: number }[] };
-  const out: number[][] = new Array(texts.length);
-  for (const d of data.data ?? []) out[d.index] = d.embedding;
-  return out;
-}
-
-function vectorLiteral(v: number[]): string {
-  return `[${v.map((x) => x.toFixed(6)).join(",")}]`;
-}
-
-function cosineSim(a: number[], b: number[]): number {
-  let dot = 0;
-  for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
-  return dot;
-}
-
-function parseVector(v: unknown): number[] | null {
-  // Fast path: pgvector via supabase-js may arrive already typed when the
-  // row was patched locally from our embed call. Avoids the split + parse.
-  if (Array.isArray(v)) return v as number[];
-  if (typeof v !== "string") return null;
-  const inner = v.slice(v.startsWith("[") ? 1 : 0, v.endsWith("]") ? -1 : undefined);
-  if (!inner) return null;
-  const arr = inner.split(",").map((s) => Number(s));
-  for (const n of arr) if (!Number.isFinite(n)) return null;
-  return arr;
-}
-
-function rankByCosine(rows: VenueRow[], queryVec: number[]): VenueRow[] {
-  const scored = rows.map((r) => {
-    const v = parseVector(r.embedding);
-    const score = v ? cosineSim(v, queryVec) : -1;
-    return { row: r, score };
-  });
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map((s) => s.row);
 }
 
 // ─────────────────────────────────────────────────────────────────────
