@@ -26,26 +26,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
-
-const AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
-
-// Restrict Google autocomplete to F&B / nightlife primary types so
-// non-hospitality matches (tire shops, mechanics, pharmacies, hardware
-// stores…) don't pollute the picker. Google's API caps this at 5 from
-// Table A, so we pick the broadest 5 that cover Mesita's universe.
-// Trade-off: cuisine-specific Table A types (italian_restaurant,
-// mexican_restaurant, sushi_restaurant, …) get filtered out because
-// each place has exactly one primary type. The Mesita-side ILIKE
-// fallback below still surfaces them once they've been onboarded —
-// and a new cuisine-specific place can be added by pasting the Google
-// Place ID directly through business-create-unit.
-const MESITA_PRIMARY_TYPES = [
-  "restaurant",
-  "bar",
-  "cafe",
-  "night_club",
-  "bakery",
-];
+import {
+  classifyGoogleError,
+  escapeIlike,
+  friendlyGoogleError,
+  GOOGLE_PLACES_AUTOCOMPLETE_URL,
+  MESITA_PRIMARY_TYPES,
+  readGooglePlacesKey,
+} from "../_shared/google-places.ts";
 
 type Body = { input?: string; sessionToken?: string };
 
@@ -71,15 +59,9 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("SUPA_GMP_KEY");
-  if (!apiKey) {
-    return json({
-      ok: false,
-      code: "server_missing_key",
-      error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set SUPA_GMP_KEY.",
-    });
-  }
+  const keyRes = readGooglePlacesKey();
+  if (!keyRes.ok) return keyRes.response;
+  const apiKey = keyRes.key;
 
   let body: Body = {};
   try {
@@ -205,7 +187,7 @@ async function fetchGooglePredictions(
   predictions: Prediction[];
   errorEnvelope?: Record<string, unknown>;
 }> {
-  const r = await fetch(AUTOCOMPLETE_URL, {
+  const r = await fetch(GOOGLE_PLACES_AUTOCOMPLETE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -296,12 +278,6 @@ async function fetchMesitaPredictions(
   }));
 }
 
-function escapeIlike(s: string): string {
-  // % and _ are wildcards in ILIKE — escape so user input doesn't
-  // accidentally match everything.
-  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
-}
-
 // Resolves a placeId list against Mesita venues + venue_members. Used
 // to backfill status for Google-sourced predictions the ILIKE fallback
 // missed because the input string didn't match the venue name.
@@ -369,38 +345,3 @@ async function statusesForVenues(
   return out;
 }
 
-// ── Google error classification ───────────────────────────────────────
-
-function classifyGoogleError(status: number, body: string): string {
-  if (status === 403) {
-    if (/referer|referrer/i.test(body)) return "google_referrer_blocked";
-    if (/api.+disabled|not.+enabled/i.test(body)) return "google_api_disabled";
-    if (/quota|exceeded/i.test(body)) return "google_quota_exceeded";
-    return "google_permission_denied";
-  }
-  if (status === 400) return "google_bad_request";
-  if (status === 429) return "google_rate_limited";
-  if (status >= 500) return "google_unavailable";
-  return "google_error";
-}
-
-function friendlyGoogleError(code: string, status: number, body: string): string {
-  switch (code) {
-    case "google_referrer_blocked":
-      return "Google rejected the request — the API key has a referrer / IP restriction blocking server-to-server calls. Remove the HTTP-referrer restriction on the Mesita backend key (the browser key keeps its restriction).";
-    case "google_api_disabled":
-      return "Google Places API (New) isn't enabled on the configured key. Enable it in Google Cloud → APIs & Services.";
-    case "google_quota_exceeded":
-      return "The Google Places quota for today is exhausted. Try again later or raise the daily cap in Google Cloud.";
-    case "google_permission_denied":
-      return "Google denied the request (permission). Check that the API key is valid and the project is billing-enabled.";
-    case "google_bad_request":
-      return `Google rejected the search: ${body.slice(0, 200)}`;
-    case "google_rate_limited":
-      return "Too many searches in a short window. Wait a few seconds and try again.";
-    case "google_unavailable":
-      return "Google Places is unavailable right now (5xx). Try again in a moment.";
-    default:
-      return `Google ${status}: ${body.slice(0, 200)}`;
-  }
-}

@@ -13,8 +13,12 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
-
-const DETAILS_BASE = "https://places.googleapis.com/v1/places";
+import {
+  classifyGoogleError,
+  friendlyGoogleError,
+  GOOGLE_PLACES_DETAILS_BASE,
+  readGooglePlacesKey,
+} from "../_shared/google-places.ts";
 
 const FIELD_MASK = [
   "id",
@@ -67,15 +71,9 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Method not allowed" });
   }
 
-  const apiKey = Deno.env.get("SUPA_GMP_KEY");
-  if (!apiKey) {
-    return json({
-      ok: false,
-      code: "server_missing_key",
-      error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set SUPA_GMP_KEY.",
-    });
-  }
+  const keyRes = readGooglePlacesKey();
+  if (!keyRes.ok) return keyRes.response;
+  const apiKey = keyRes.key;
 
   let body: Body = {};
   try {
@@ -94,7 +92,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const url = new URL(`${DETAILS_BASE}/${encodeURIComponent(placeId)}`);
+    const url = new URL(`${GOOGLE_PLACES_DETAILS_BASE}/${encodeURIComponent(placeId)}`);
     url.searchParams.set("sessionToken", sessionToken);
 
     const r = await fetch(url.toString(), {
@@ -130,43 +128,6 @@ Deno.serve(async (req) => {
     });
   }
 });
-
-function classifyGoogleError(status: number, body: string): string {
-  if (status === 403) {
-    if (/referer|referrer/i.test(body)) return "google_referrer_blocked";
-    if (/api.+disabled|not.+enabled/i.test(body)) return "google_api_disabled";
-    if (/quota|exceeded/i.test(body)) return "google_quota_exceeded";
-    return "google_permission_denied";
-  }
-  if (status === 400) return "google_bad_request";
-  if (status === 404) return "google_not_found";
-  if (status === 429) return "google_rate_limited";
-  if (status >= 500) return "google_unavailable";
-  return "google_error";
-}
-
-function friendlyGoogleError(code: string, status: number, body: string): string {
-  switch (code) {
-    case "google_referrer_blocked":
-      return "Google rejected the request — the API key has a referrer / IP restriction blocking server-to-server calls. Remove the HTTP-referrer restriction on the Mesita backend key.";
-    case "google_api_disabled":
-      return "Google Places API (New) isn't enabled on the configured key. Enable it in Google Cloud → APIs & Services.";
-    case "google_quota_exceeded":
-      return "The Google Places quota for today is exhausted. Try again later or raise the daily cap.";
-    case "google_permission_denied":
-      return "Google denied the request (permission). Check the API key + billing.";
-    case "google_bad_request":
-      return `Google rejected the lookup: ${body.slice(0, 200)}`;
-    case "google_not_found":
-      return "Google can't find that venue anymore — pick a different result.";
-    case "google_rate_limited":
-      return "Too many lookups in a short window. Wait a few seconds and try again.";
-    case "google_unavailable":
-      return "Google Places is unavailable right now (5xx). Try again in a moment.";
-    default:
-      return `Google ${status}: ${body.slice(0, 200)}`;
-  }
-}
 
 function normalise(placeId: string, d: GoogleDetails) {
   const find = (type: string) =>

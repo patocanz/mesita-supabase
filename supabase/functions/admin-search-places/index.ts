@@ -24,8 +24,11 @@ import {
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
-
-const TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText";
+import {
+  GOOGLE_PLACES_TEXT_SEARCH_URL,
+  googleErrorFromResponse,
+  readGooglePlacesKey,
+} from "../_shared/google-places.ts";
 
 // Per-query pagination cap. Google Places Text Search v1 returns up to
 // 20 results per page and exposes at most ~60 results (3 pages) per
@@ -92,15 +95,9 @@ Deno.serve(async (req) => {
   }
 
   // --- Google key ---
-  const googleKey = Deno.env.get("SUPA_GMP_KEY");
-  if (!googleKey) {
-    return json({
-      ok: false,
-      code: "server_missing_google_key",
-      error:
-        "Mesita backend isn't configured for Google Places. Tell support — they need to set SUPA_GMP_KEY.",
-    });
-  }
+  const keyRes = readGooglePlacesKey();
+  if (!keyRes.ok) return keyRes.response;
+  const googleKey = keyRes.key;
 
   // --- Parse body ---
   let body: RequestBody = {};
@@ -257,7 +254,7 @@ async function searchTextWithPagination(
     if (regionCode) body.regionCode = regionCode;
     if (pageToken) body.pageToken = pageToken;
 
-    const r = await fetch(TEXT_SEARCH_URL, {
+    const r = await fetch(GOOGLE_PLACES_TEXT_SEARCH_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -269,8 +266,7 @@ async function searchTextWithPagination(
     });
 
     if (!r.ok) {
-      const text = await r.text();
-      throw new Error(googleErrorMessage(r.status, text));
+      throw await googleErrorFromResponse(r);
     }
 
     const data = (await r.json()) as {
@@ -310,22 +306,3 @@ async function searchTextWithPagination(
   return out;
 }
 
-function googleErrorMessage(status: number, body: string): string {
-  const snippet = body.slice(0, 200);
-  if (status === 403) {
-    if (/referer|referrer/i.test(body)) {
-      return "Google rejected server-to-server call (referrer restriction on the API key). Remove the HTTP-referrer restriction on the Mesita backend key.";
-    }
-    if (/api.+disabled|not.+enabled/i.test(body)) {
-      return "Google Places API (New) is not enabled on the configured key.";
-    }
-    if (/quota|exceeded/i.test(body)) {
-      return "Google Places quota exceeded for today.";
-    }
-    return `Google denied request: ${snippet}`;
-  }
-  if (status === 400) return `Google rejected query: ${snippet}`;
-  if (status === 429) return "Google rate-limited the request — try again with fewer queries or wait a few seconds.";
-  if (status >= 500) return "Google Places is unavailable right now (5xx).";
-  return `Google ${status}: ${snippet}`;
-}
