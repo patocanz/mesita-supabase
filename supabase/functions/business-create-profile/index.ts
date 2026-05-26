@@ -22,7 +22,12 @@ import {
 } from "../_shared/auth.ts";
 
 type Body = {
+  // Legacy single-field name. Still accepted so older clients keep
+  // working. New clients should send first_name + last_name; this EF
+  // joins them to repopulate full_name for downstream readers.
   full_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
   phone?: string | null;
 };
 
@@ -44,7 +49,12 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Invalid JSON" }, 400);
   }
 
-  const fullName = clean(body.full_name, 120);
+  const firstName = clean(body.first_name, 60);
+  const lastName = clean(body.last_name, 60);
+  const fullName =
+    body.first_name !== undefined || body.last_name !== undefined
+      ? [firstName, lastName].filter(Boolean).join(" ") || null
+      : clean(body.full_name, 120);
   const phone = clean(body.phone, 32);
 
   const admin = adminClient(envRes.env);
@@ -77,9 +87,19 @@ Deno.serve(async (req) => {
   }
 
   // Build a patch with only the fields the caller sent — avoids
-  // null-clobbering values they didn't intend to touch.
+  // null-clobbering values they didn't intend to touch. When the
+  // client sends first_name and/or last_name, full_name is also
+  // updated to the joined version so downstream readers keep working.
   const patch: Record<string, unknown> = {};
-  if (body.full_name !== undefined) patch.full_name = fullName;
+  if (body.first_name !== undefined) patch.first_name = firstName;
+  if (body.last_name !== undefined) patch.last_name = lastName;
+  if (
+    body.first_name !== undefined ||
+    body.last_name !== undefined ||
+    body.full_name !== undefined
+  ) {
+    patch.full_name = fullName;
+  }
   if (body.phone !== undefined) patch.phone = phone;
 
   if (Object.keys(patch).length === 0) {
@@ -90,7 +110,7 @@ Deno.serve(async (req) => {
     .from("businesses")
     .update(patch)
     .eq("id", userId)
-    .select("id, full_name, email, phone, created_at")
+    .select("id, full_name, first_name, last_name, email, phone, created_at")
     .single();
   if (update.error) {
     return json(
