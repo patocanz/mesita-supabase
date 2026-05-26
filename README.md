@@ -22,8 +22,8 @@ supabase/
 │   ├── admin-*/             # Admin console flows (super-admin gated)
 │   ├── consumer-*/          # B2C diner flows
 │   ├── business-*/          # B2B venue business flows
-│   └── staff-*/             # WhatsApp validator (waiter) flows
-├── migrations/              # Versioned SQL migrations (0001 … 0025)
+│   └── staff-*/             # WhatsApp validator (waiter) post-invite flow
+├── migrations/              # Versioned SQL migrations (0001 … 0026)
 └── seed.sql                 # Idempotent local seed
 ```
 
@@ -39,7 +39,8 @@ supabase db push
 # Deploy one or more Edge Functions
 supabase functions deploy <function-name> [<function-name> ...]
 
-# Regenerate TypeScript types for every consumer web repo + push
+# Push pending migrations and regenerate TypeScript types for every
+# web repo that consumes them (business, consumer, admin).
 ./scripts/deploy.sh
 ```
 
@@ -47,18 +48,18 @@ supabase functions deploy <function-name> [<function-name> ...]
 
 | Prefix | Auth pool | Purpose |
 |---|---|---|
-| `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset |
+| `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset, Atlas snapshots |
 | `business-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
 | `consumer-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
-| `staff-*` | phone OTP (post-invite) | WhatsApp validator flows |
+| `staff-*` | phone OTP (post-invite) | WhatsApp validator (waiter) post-invite handshake |
 
 `_shared/` holds pure imports (HTTP/CORS helpers, env+auth wrappers, role catalog, token generator). It is **not** a runtime dependency — Supabase bundles imported source per-function at deploy time, so the "no function-to-function calls" rule is still honored.
 
 ## Schema highlights
 
 - **`venues`** — the catalog. Status: `lead | active | paused | archived`. Listing type: `partner | web`.
-- **`venue_members`** — businesses ↔ venues with role `owner | editor | viewer | staff` (legacy `staff` only on pre-`venue_roles` rows).
-- **`venue_roles`** — newer phone-pool roles (`staff | business`) bound directly to `auth.users`.
+- **`venue_members`** — businesses ↔ venues with role `owner | editor | viewer | staff` (legacy `staff` preserved on pre-`venue_roles` rows; the `manager` value was renamed to `editor` in `0025`).
+- **`venue_roles`** — phone-pool roles bound directly to `auth.users` (waiter sign-in lives here).
 - **`staff_invites` / `business_invites`** — token-based pending invitations.
 - **`tickets`** — consumer tickets with status / story / reservation / cashback / discount columns.
 - **`super_admins`** — allow-list bypass for the admin console.
