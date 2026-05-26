@@ -156,17 +156,19 @@ verify_jwt = false
 [functions.recommender-rank-catalog]
 verify_jwt = false
 
-# Artificial callers (places-*) — Google Places proxy split. The Google
-# key (SUPA_GMP_KEY) only lives inside these EFs; natural callers forward
-# requests through invokeArtificialCaller.
+# Artificial callers (atlas-*) — venue intelligence + encyclopaedia. The
+# Google Places key (SUPA_GMP_KEY) only lives inside these EFs; natural
+# callers forward requests through invokeArtificialCaller. Atlas is the
+# umbrella for every venue-research / venue-data-source surface (Google,
+# Foursquare, schema.org, Atlas Storage snapshots, …).
 
-[functions.places-suggest-autocomplete]
+[functions.atlas-suggest-venue]
 verify_jwt = false
 
-[functions.places-search-text]
+[functions.atlas-search-venues]
 verify_jwt = false
 
-[functions.places-get-details]
+[functions.atlas-get-venue]
 verify_jwt = false
 
 # Authed consumer writes / reads tied to the signed-in consumer's own data.

@@ -1,5 +1,6 @@
-// Supabase Edge Function — places-suggest-autocomplete (artificial caller)
+// Supabase Edge Function — atlas-suggest-venue (artificial caller)
 //
+// Part of the Atlas namespace (venue intelligence + encyclopaedia).
 // Proxies Google Places (New) Autocomplete + a Mesita-side name ILIKE
 // fallback in parallel, merges the two, and returns predictions tagged
 // with per-row status (`not_in_mesita`, `web_listed`,
@@ -13,7 +14,7 @@
 // Auth: artificial caller — verify_jwt = false at the gateway; the EF
 // itself enforces the service-role bearer via requireInternalCaller.
 //
-// Deploy: supabase functions deploy places-suggest-autocomplete
+// Deploy: supabase functions deploy atlas-suggest-venue
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -221,7 +222,7 @@ async function fetchMesitaPredictions(
     .not("google_place_id", "is", null)
     .limit(8);
   if (error) {
-    console.error("[places-suggest-autocomplete] mesita search:", error.message);
+    console.error("[atlas-suggest-venue] mesita search:", error.message);
     return [];
   }
   type Row = {
@@ -252,7 +253,7 @@ async function enrichByPlaceIds(
     .select("id, google_place_id")
     .in("google_place_id", placeIds);
   if (error) {
-    console.error("[places-suggest-autocomplete] placeId enrichment:", error.message);
+    console.error("[atlas-suggest-venue] placeId enrichment:", error.message);
     return new Map();
   }
   type Row = { id: string; google_place_id: string };
@@ -275,7 +276,7 @@ async function statusesForVenues(
     .in("venue_id", rows.map((r) => r.id))
     .eq("role", "owner");
   if (error) {
-    console.error("[places-suggest-autocomplete] owner lookup:", error.message);
+    console.error("[atlas-suggest-venue] owner lookup:", error.message);
   }
   const ownerByVenue = new Map<string, string>();
   for (const m of (data ?? []) as Array<{

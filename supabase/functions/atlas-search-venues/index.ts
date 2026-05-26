@@ -1,5 +1,6 @@
-// Supabase Edge Function — places-search-text (artificial caller)
+// Supabase Edge Function — atlas-search-venues (artificial caller)
 //
+// Part of the Atlas namespace (venue intelligence + encyclopaedia).
 // Runs many Google Places Text Search queries in one batch and returns
 // the union of Place IDs across all of them. Paginates each query up to
 // the API max (3 pages × 20 = 60 results) and runs queries with bounded
@@ -12,7 +13,7 @@
 // Auth: artificial caller — verify_jwt = false at the gateway; the EF
 // itself enforces the service-role bearer via requireInternalCaller.
 //
-// Deploy: supabase functions deploy places-search-text
+// Deploy: supabase functions deploy atlas-search-venues
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";

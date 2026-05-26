@@ -17,7 +17,7 @@ export const GOOGLE_PLACES_KEY_ENV = "SUPA_GMP_KEY";
 // Table A; we pick the broadest 5 that cover Mesita's universe. Trade-off:
 // cuisine-specific Table A types (italian_restaurant, mexican_restaurant,
 // sushi_restaurant, …) get filtered out because each place has exactly one
-// primary type. The Mesita-side ILIKE fallback in places-suggest-autocomplete
+// primary type. The Mesita-side ILIKE fallback in atlas-suggest-venue
 // still surfaces them once they've been onboarded.
 export const MESITA_PRIMARY_TYPES = [
   "restaurant",

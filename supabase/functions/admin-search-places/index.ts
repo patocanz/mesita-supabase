@@ -1,14 +1,14 @@
 // Supabase Edge Function — admin-search-places (natural caller)
 //
 // Thin facade for the admin bulk-search UI. Gates the request to
-// super_admins, then forwards the query batch to the places-search-text
+// super_admins, then forwards the query batch to the atlas-search-venues
 // artificial caller for the actual Google fan-out + Mesita enrichment.
 //
 // Auth: caller's JWT email must be in public.super_admins. verify_jwt = true
 // at the gateway gates the request to a real session before we even see it.
 //
 // Wire status is always 200 with a { ok, ... } body — same shape as the
-// other Places proxies. supabase-js's invoke helper swallows non-2xx
+// other natural callers. supabase-js's invoke helper swallows non-2xx
 // bodies, so meaningful errors travel in the body, not the HTTP status.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
   const result = await invokeArtificialCaller(
     env,
     "admin-search-places",
-    "places-search-text",
+    "atlas-search-venues",
     body,
   );
   if (!result.ok) {

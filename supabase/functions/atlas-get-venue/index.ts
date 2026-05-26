@@ -1,5 +1,6 @@
-// Supabase Edge Function — places-get-details (artificial caller)
+// Supabase Edge Function — atlas-get-venue (artificial caller)
 //
+// Part of the Atlas namespace (venue intelligence + encyclopaedia).
 // Fetches a full Google Place by id, normalised into Mesita's shape
 // (camelCase keys, opening-hours array, numeric price level). Field mask
 // is intentionally tight to keep per-call cost down; anything else we
@@ -8,7 +9,7 @@
 // Auth: artificial caller — verify_jwt = false at the gateway; the EF
 // itself enforces the service-role bearer via requireInternalCaller.
 //
-// Deploy: supabase functions deploy places-get-details
+// Deploy: supabase functions deploy atlas-get-venue
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
