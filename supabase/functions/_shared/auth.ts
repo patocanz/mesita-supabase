@@ -45,7 +45,7 @@ export function readEFEnv():
 
 // ─── User auth ──────────────────────────────────────────────────────
 
-export type AuthedUser = {
+type AuthedUser = {
   id: string;
   email: string | null;
   emailLower: string | null;
@@ -111,9 +111,9 @@ export function adminClient(env: EFEnv): SupabaseClient {
 // Mirrors the public.member_role enum (see migration 0025). 'staff' is
 // legacy — only present on venue_members rows created before venue_roles
 // existed; the Team UI speaks owner / editor / viewer.
-export type MembershipRole = "owner" | "editor" | "viewer" | "staff";
+type MembershipRole = "owner" | "editor" | "viewer" | "staff";
 
-export type Membership = {
+type Membership = {
   isSuperAdmin: boolean;
   // The venue_members.role for the caller, or null when the caller has
   // no membership row (super-admins land here too — owners write access
