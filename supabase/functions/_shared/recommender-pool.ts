@@ -14,17 +14,17 @@ import { haversineKm, radiusBoundingBox } from "./geo.ts";
 // Same projection as VENUE_PUBLIC_COLUMNS but with the two ranker-internal
 // columns appended. Both columns are stripped by the ranker before the row
 // crosses back over the wire to the client.
-export const RECOMMENDER_VENUE_COLUMNS =
+const RECOMMENDER_VENUE_COLUMNS =
   VENUE_PUBLIC_COLUMNS + ", embedding, embedding_source_hash";
 
-export type CandidatePoolOptions = {
+type CandidatePoolOptions = {
   lat: number | null;
   lng: number | null;
   radiusKm: number;
   poolSize: number;
 };
 
-export type CandidatePoolResult<T> =
+type CandidatePoolResult<T> =
   | { ok: true; rows: T[] }
   | { ok: false; error: string };
 
