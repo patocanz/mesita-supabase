@@ -181,6 +181,24 @@ verify_jwt = true
 [functions.consumer-list-tickets]
 verify_jwt = true
 
+# Entity-split EFs (migration 0031). consumer-list-tickets stays for
+# now while clients migrate; the new surfaces split saved-venues,
+# reservations, and coupons into first-class entities.
+[functions.consumer-save-venue]
+verify_jwt = true
+
+[functions.consumer-list-saved-venues]
+verify_jwt = true
+
+[functions.consumer-list-coupons]
+verify_jwt = true
+
+[functions.consumer-list-reservations]
+verify_jwt = true
+
+[functions.consumer-create-reservation]
+verify_jwt = true
+
 [functions.consumer-submit-story]
 verify_jwt = true
 
