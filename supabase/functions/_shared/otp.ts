@@ -33,7 +33,7 @@ export async function sha256Hex(input: string): Promise<string> {
 
 // ─── Phase 1: insert pending OTP verification ──────────────────────
 
-export type OtpMethod = "ai_call" | "ai_email";
+type OtpMethod = "ai_call" | "ai_email";
 
 // Drops any prior pending claim by this requester on this venue, then
 // inserts a fresh pending row with the codeHash baked into the payload.
