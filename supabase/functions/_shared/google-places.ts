@@ -9,7 +9,7 @@
 
 import { json } from "./http.ts";
 
-export const GOOGLE_PLACES_KEY_ENV = "SUPA_GMP_KEY";
+const GOOGLE_PLACES_KEY_ENV = "SUPA_GMP_KEY";
 
 // Restrict Google autocomplete + text-search to F&B / nightlife primary
 // types so non-hospitality matches (tire shops, mechanics, pharmacies,
@@ -35,7 +35,7 @@ export const GOOGLE_PLACES_TEXT_SEARCH_URL =
 export const GOOGLE_PLACES_DETAILS_BASE =
   "https://places.googleapis.com/v1/places";
 
-export type GoogleErrorCode =
+type GoogleErrorCode =
   | "google_referrer_blocked"
   | "google_api_disabled"
   | "google_quota_exceeded"
