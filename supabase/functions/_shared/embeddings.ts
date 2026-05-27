@@ -11,13 +11,13 @@
 
 import type { createClient } from "jsr:@supabase/supabase-js@2";
 
-export const EMBEDDING_MODEL = "text-embedding-3-small";
+const EMBEDDING_MODEL = "text-embedding-3-small";
 export const EMBEDDING_DIMS = 1536;
 
 // Structural type satisfied by every EF's VenueRow definition. Only the
 // fields used for source-text + persistence are required; readers may carry
 // arbitrary extra columns.
-export type EmbeddableVenue = {
+type EmbeddableVenue = {
   id: string;
   name: string;
   category: string | null;
@@ -33,7 +33,7 @@ export type EmbeddableVenue = {
 // Stable source text we feed to the embedder. Order matters — name first so
 // the model anchors on identity, then the soft descriptors. Story is hard-
 // capped so a freakishly long story can't dominate the embedding budget.
-export function venueSourceText(v: EmbeddableVenue): string {
+function venueSourceText(v: EmbeddableVenue): string {
   const lines: string[] = [];
   lines.push(`Name: ${v.name}`);
   if (v.category) lines.push(`Category: ${v.category}`);
@@ -47,7 +47,7 @@ export function venueSourceText(v: EmbeddableVenue): string {
 
 // Cheap stable hash of the source text so we can detect "this venue's text
 // changed, re-embed" without storing the whole text alongside the embedding.
-export async function digest(text: string): Promise<string> {
+async function digest(text: string): Promise<string> {
   const buf = new TextEncoder().encode(text);
   const hash = await crypto.subtle.digest("SHA-1", buf);
   return Array.from(new Uint8Array(hash))
@@ -64,13 +64,13 @@ export function shouldEmbed(v: EmbeddableVenue): boolean {
 // pgvector accepts vectors as text literals like "[0.01,0.02,...]". We build
 // that here so the .update() call sends a plain string (supabase-js doesn't
 // have a vector binder).
-export function vectorLiteral(v: number[]): string {
+function vectorLiteral(v: number[]): string {
   return `[${v.map((x) => x.toFixed(6)).join(",")}]`;
 }
 
 // pgvector via supabase-js may arrive already typed when a row was patched
 // locally from an embed call; otherwise it's the "[a,b,c]" text literal.
-export function parseVector(v: unknown): number[] | null {
+function parseVector(v: unknown): number[] | null {
   if (Array.isArray(v)) return v as number[];
   if (typeof v !== "string") return null;
   const inner = v.slice(v.startsWith("[") ? 1 : 0, v.endsWith("]") ? -1 : undefined);
@@ -82,7 +82,7 @@ export function parseVector(v: unknown): number[] | null {
 
 // text-embedding-3-small returns unit-length vectors, so dot product is
 // already the cosine.
-export function cosineSim(a: number[], b: number[]): number {
+function cosineSim(a: number[], b: number[]): number {
   let dot = 0;
   for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
   return dot;
