@@ -1,5 +1,5 @@
 // Shared helpers for Google Places API (New) calls. Every Mesita EF that
-// hits Google Places does the same three things — read the SUPA_GMP_KEY
+// hits Google Places does the same three things — read the GMP_KEY
 // secret, classify the response body into an error code, and translate
 // that code into operator-friendly copy. Keeping them in one place means
 // a new error case (a deprecation, a billing change) gets handled once.
@@ -9,7 +9,9 @@
 
 import { json } from "./http.ts";
 
-const GOOGLE_PLACES_KEY_ENV = "SUPA_GMP_KEY";
+// Cloud secret is GMP_KEY; SUPA_GMP_KEY is the legacy name, kept as a fallback
+// for environments that haven't been renamed yet.
+const GOOGLE_PLACES_KEY_ENVS = ["GMP_KEY", "SUPA_GMP_KEY"] as const;
 
 // Restrict Google autocomplete + text-search to F&B / nightlife primary
 // types so non-hospitality matches (tire shops, mechanics, pharmacies,
@@ -53,7 +55,11 @@ type GoogleErrorCode =
 export function readGooglePlacesKey():
   | { ok: true; key: string }
   | { ok: false; response: Response } {
-  const key = Deno.env.get(GOOGLE_PLACES_KEY_ENV);
+  let key: string | undefined;
+  for (const env of GOOGLE_PLACES_KEY_ENVS) {
+    key = Deno.env.get(env);
+    if (key) break;
+  }
   if (!key) {
     return {
       ok: false,
@@ -61,7 +67,7 @@ export function readGooglePlacesKey():
         ok: false,
         code: "server_missing_key",
         error:
-          "Mesita backend isn't configured for Google Places. Tell support — they need to set SUPA_GMP_KEY.",
+          "Mesita backend isn't configured for Google Places. Tell support — they need to set GMP_KEY.",
       }),
     };
   }
