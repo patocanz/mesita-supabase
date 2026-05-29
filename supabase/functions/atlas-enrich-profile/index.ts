@@ -142,74 +142,84 @@ Deno.serve(async (req) => {
   const sources: Record<string, unknown> = {};
   const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
 
-  // ── Apify: Instagram (followers + bio) ──────────────────────────────────
+  // The three external lookups are independent — run them concurrently so a
+  // slow actor doesn't stack latency and push the agent past the EF wall.
   let igBio = "";
-  const igHandle = instagramHandleFromUrl(row.instagram_url as string | null);
-  if (APIFY_KEY && igHandle) {
-    const items = await runApifyActor<Record<string, unknown>>(
-      APIFY_ACTORS.instagramProfile,
-      { usernames: [igHandle] },
-      APIFY_KEY,
-    );
-    const p = items?.[0];
-    if (p) {
-      const followers = numOf(p.followersCount);
-      if (followers != null) update.instagram_followers_count = followers;
-      if (typeof p.biography === "string") igBio = p.biography;
-      sources.apify_instagram = { handle: igHandle, ok: true };
-    } else {
-      sources.apify_instagram = { handle: igHandle, ok: false };
-    }
-  }
-
-  // ── Apify: Facebook (followers + rating) ────────────────────────────────
-  if (APIFY_KEY && typeof row.facebook_url === "string" && row.facebook_url) {
-    const items = await runApifyActor<Record<string, unknown>>(
-      APIFY_ACTORS.facebookPages,
-      { startUrls: [{ url: row.facebook_url }] },
-      APIFY_KEY,
-    );
-    const p = items?.[0];
-    if (p) {
-      const followers = numOf(p.followers) ?? numOf(p.likes);
-      const rating = numOf(p.rating) ?? numOf(p.overallStarRating);
-      if (followers != null) update.facebook_followers = followers;
-      if (rating != null && rating >= 0 && rating <= 5) {
-        update.facebook_rating = rating;
-      }
-      sources.apify_facebook = { ok: true };
-    } else {
-      sources.apify_facebook = { ok: false };
-    }
-  }
-
-  // ── Firecrawl: website markdown (menu grounding) ────────────────────────
   let siteMarkdown = "";
-  if (FIRECRAWL_KEY && typeof row.website_url === "string" && row.website_url) {
-    try {
-      const r = await fetch(FIRECRAWL_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${FIRECRAWL_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: row.website_url,
-          formats: ["markdown"],
-          onlyMainContent: true,
-        }),
-      });
-      if (r.ok) {
-        const data = (await r.json()) as { data?: { markdown?: string } };
-        siteMarkdown = (data.data?.markdown ?? "").slice(0, 6000);
-        sources.firecrawl = { ok: !!siteMarkdown };
+  const igHandle = instagramHandleFromUrl(row.instagram_url as string | null);
+
+  await Promise.all([
+    // Apify → Instagram (followers + bio).
+    (async () => {
+      if (!APIFY_KEY || !igHandle) return;
+      const items = await runApifyActor<Record<string, unknown>>(
+        APIFY_ACTORS.instagramProfile,
+        { usernames: [igHandle] },
+        APIFY_KEY,
+      );
+      const p = items?.[0];
+      if (p) {
+        const followers = numOf(p.followersCount);
+        if (followers != null) update.instagram_followers_count = followers;
+        if (typeof p.biography === "string") igBio = p.biography;
+        sources.apify_instagram = { handle: igHandle, ok: true };
       } else {
+        sources.apify_instagram = { handle: igHandle, ok: false };
+      }
+    })(),
+    // Apify → Facebook (followers + rating).
+    (async () => {
+      if (!APIFY_KEY || typeof row.facebook_url !== "string" || !row.facebook_url) {
+        return;
+      }
+      const items = await runApifyActor<Record<string, unknown>>(
+        APIFY_ACTORS.facebookPages,
+        { startUrls: [{ url: row.facebook_url }] },
+        APIFY_KEY,
+      );
+      const p = items?.[0];
+      if (p) {
+        const followers = numOf(p.followers) ?? numOf(p.likes);
+        const rating = numOf(p.rating) ?? numOf(p.overallStarRating);
+        if (followers != null) update.facebook_followers = followers;
+        if (rating != null && rating >= 0 && rating <= 5) {
+          update.facebook_rating = rating;
+        }
+        sources.apify_facebook = { ok: true };
+      } else {
+        sources.apify_facebook = { ok: false };
+      }
+    })(),
+    // Firecrawl → website markdown (menu grounding).
+    (async () => {
+      if (!FIRECRAWL_KEY || typeof row.website_url !== "string" || !row.website_url) {
+        return;
+      }
+      try {
+        const r = await fetch(FIRECRAWL_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${FIRECRAWL_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: row.website_url,
+            formats: ["markdown"],
+            onlyMainContent: true,
+          }),
+        });
+        if (r.ok) {
+          const data = (await r.json()) as { data?: { markdown?: string } };
+          siteMarkdown = (data.data?.markdown ?? "").slice(0, 6000);
+          sources.firecrawl = { ok: !!siteMarkdown };
+        } else {
+          sources.firecrawl = { ok: false };
+        }
+      } catch {
         sources.firecrawl = { ok: false };
       }
-    } catch {
-      sources.firecrawl = { ok: false };
-    }
-  }
+    })(),
+  ]);
 
   // ── Perplexity: grounded synthesis ──────────────────────────────────────
   if (!PERPLEXITY_KEY) {
