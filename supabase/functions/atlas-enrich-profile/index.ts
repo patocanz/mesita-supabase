@@ -408,9 +408,10 @@ Deno.serve(async (req) => {
   }
 
   // Persist any newly resolved channel so future reads + re-runs have them.
-  if (resolvedInstagram && resolvedInstagram !== row.instagram_url) {
-    update.instagram_url = resolvedInstagram;
-  }
+  // NOTE: instagram_url is deliberately NOT persisted here — for a generic
+  // name the searched candidate may be a different same-named account, so we
+  // only persist it AFTER the IG scrape verifies it belongs to this venue
+  // (see the Instagram gather step below).
   if (resolvedFacebook && resolvedFacebook !== row.facebook_url) {
     update.facebook_url = resolvedFacebook;
   }
@@ -464,6 +465,8 @@ Deno.serve(async (req) => {
   let googleImages: string[] = prior?.googleImages ?? [];
   let websiteImages: string[] = prior?.websiteImages ?? [];
   let instagramImages: string[] = prior?.instagramImages ?? [];
+  // Only set once the scraped IG profile verifies as THIS venue's account.
+  let verifiedInstagramUrl: string | null = reuseIg ? resolvedInstagram : null;
 
   if (reuseGoogle) sources.apify_google_reviews = { reused: true, count: reviews.length };
   if (reuseIg) sources.apify_instagram = { reused: true };
@@ -561,22 +564,57 @@ Deno.serve(async (req) => {
       }
     })(),
     // Apify → Instagram: followers + bio + post IMAGES (top by likes).
+    // IDENTITY-VERIFIED: a venue name like "Metropolitan Club" is generic, so
+    // the searched candidate can be a DIFFERENT same-named account. We scrape
+    // the candidate, read its bio/name/link, and confirm it's THIS venue's
+    // (website-domain match, else a strict LLM judge). If it doesn't verify, we
+    // fall back to a Perplexity-resolved handle and verify that. If nothing
+    // verifies, we attach NO Instagram — a missing IG beats a wrong one.
     (async () => {
       if (!runInstagram) return;
-      const items = await runApifyActor<Record<string, unknown>>(
-        APIFY_ACTORS.instagramProfile,
-        { usernames: [igHandle] },
-        APIFY_KEY!,
-      );
-      const p = items?.[0];
-      if (p) {
+      const venueCtx = {
+        name: row.name as string,
+        locationLine: [row.address, row.city].filter(Boolean).join(", "),
+        website: resolvedWebsite,
+        category: (row.category as string | null) ?? null,
+      };
+      const tried = new Set<string>();
+      const attempt = async (handle: string | null) => {
+        if (!handle || tried.has(handle.toLowerCase())) return null;
+        tried.add(handle.toLowerCase());
+        const items = await runApifyActor<Record<string, unknown>>(
+          APIFY_ACTORS.instagramProfile,
+          { usernames: [handle] },
+          APIFY_KEY!,
+        );
+        const p = items?.[0];
+        if (!p) return null;
+        const ok = await igProfileMatchesVenue(p, venueCtx, OPENAI_KEY);
+        return { handle, p, ok };
+      };
+
+      // 1) The Firecrawl/Google candidate.
+      let chosen = await attempt(igHandle);
+      // 2) If it didn't verify, ask Perplexity for the right account + verify.
+      if ((!chosen || !chosen.ok) && PERPLEXITY_KEY) {
+        const pp = await discoverChannelsPerplexity(
+          PERPLEXITY_KEY,
+          venueCtx.name,
+          venueCtx.locationLine,
+          venueCtx.category,
+        );
+        const alt = await attempt(instagramHandleFromUrl(pp?.instagram_url ?? null));
+        if (alt?.ok) chosen = alt;
+      }
+
+      if (chosen?.ok) {
+        const p = chosen.p;
+        verifiedInstagramUrl = `https://www.instagram.com/${chosen.handle}`;
         igFollowers = numOf(p.followersCount);
         if (typeof p.biography === "string") igBio = p.biography;
         const posts = Array.isArray(p.latestPosts)
           ? (p.latestPosts as Record<string, unknown>[])
           : [];
-        // Metadata sort for Instagram = by likes (most-liked posts first),
-        // then take the gather cap.
         instagramImages = posts
           .filter(
             (po) =>
@@ -588,13 +626,20 @@ Deno.serve(async (req) => {
           .slice(0, gatherInstagramPosts)
           .map((po) => po.displayUrl as string);
         sources.apify_instagram = {
-          handle: igHandle,
+          handle: chosen.handle,
           ok: true,
+          verified: true,
           posts: posts.length,
           images: instagramImages.length,
         };
       } else {
-        sources.apify_instagram = { handle: igHandle, ok: false };
+        // No account passed identity verification — attach nothing.
+        sources.apify_instagram = {
+          ok: false,
+          reason: chosen ? "unverified" : "not_found",
+          candidate: igHandle,
+          tried: [...tried],
+        };
       }
     })(),
     // Apify → Facebook (followers + rating).
@@ -664,6 +709,14 @@ Deno.serve(async (req) => {
   if (igFollowers != null) update.instagram_followers_count = igFollowers;
   if (fbFollowers != null) update.facebook_followers = fbFollowers;
   if (fbRating != null) update.facebook_rating = fbRating;
+  // Persist instagram_url ONLY if the scrape verified it belongs to this venue.
+  if (verifiedInstagramUrl && verifiedInstagramUrl !== row.instagram_url) {
+    update.instagram_url = verifiedInstagramUrl;
+  }
+  // Snapshots must store the VERIFIED handle (or null) — never the unverified
+  // candidate — so a future pre-read reuse doesn't resurrect a wrong account.
+  resolvedInstagram = verifiedInstagramUrl;
+  if (discovered) discovered.instagram_url = verifiedInstagramUrl;
 
   // ── Re-host ephemeral images (durable gallery) ───────────────────────────
   // Instagram CDN URLs expire (signed) and some website images hotlink-block;
@@ -1500,6 +1553,80 @@ function validHost(v: unknown, allowed: string[] | null): string | null {
     if (u.pathname === "/" || u.pathname === "") return null;
   }
   return u.toString();
+}
+
+function domainOf(url: string | null | undefined): string | null {
+  if (!url || typeof url !== "string") return null;
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+// Does this scraped Instagram profile belong to THIS venue? Generic names
+// ("Metropolitan Club") make the searched candidate unreliable, so we confirm
+// before trusting it: a bio link to the venue's own website domain is an
+// instant yes; otherwise a strict LLM judge over the handle/name/bio decides,
+// biased to FALSE when unsure. No OpenAI key → reject (don't trust a guess).
+async function igProfileMatchesVenue(
+  p: Record<string, unknown>,
+  venue: { name: string; locationLine: string; website: string | null; category: string | null },
+  openaiKey: string | undefined,
+): Promise<boolean> {
+  const username = typeof p.username === "string" ? p.username : "";
+  const fullName = typeof p.fullName === "string" ? p.fullName : "";
+  const bio = typeof p.biography === "string" ? p.biography : "";
+  const links: string[] = [];
+  if (typeof p.externalUrl === "string") links.push(p.externalUrl);
+  if (Array.isArray(p.externalUrls)) {
+    for (const e of p.externalUrls) {
+      const u = (e as { url?: unknown })?.url;
+      if (typeof u === "string") links.push(u);
+    }
+  }
+
+  // Strong signal: the IG bio link points to the venue's own website domain.
+  const wd = domainOf(venue.website);
+  if (wd && links.some((l) => domainOf(l) === wd)) return true;
+
+  if (!openaiKey) return false;
+  try {
+    const r = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        temperature: 0,
+        max_tokens: 80,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content:
+              `Decide if an Instagram profile is the OFFICIAL account of THE EXACT ` +
+              `venue below (same business, same city). A different business that ` +
+              `merely shares a similar name is NOT a match — answer false when unsure.\n\n` +
+              `Venue: "${venue.name}"` +
+              (venue.locationLine ? `, ${venue.locationLine}` : "") +
+              (venue.category ? `, category: ${venue.category}` : "") +
+              (venue.website ? `, website: ${venue.website}` : "") +
+              `\nInstagram: @${username}, name: "${fullName}", bio: "${bio.slice(0, 500)}", ` +
+              `links: ${links.join(", ") || "none"}\n\n` +
+              `Reply JSON {"match": true} or {"match": false}.`,
+          },
+        ],
+      }),
+    });
+    if (!r.ok) return false;
+    const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+    const obj = safeParseJson(data.choices?.[0]?.message?.content ?? "") as
+      | { match?: unknown }
+      | null;
+    return obj?.match === true;
+  } catch {
+    return false;
+  }
 }
 
 function dedup(arr: string[]): string[] {
