@@ -17,6 +17,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { adminClient, getAuthedUser, readEFEnv } from "../_shared/auth.ts";
+import { getTierConfig } from "../_shared/membership.ts";
 
 type Body = {
   venue_id?: string;
@@ -60,6 +61,45 @@ Deno.serve(async (req) => {
   }
 
   const admin = adminClient(envRes.env);
+
+  // ── Monthly reservation cap (Premium perk: "more reservations") ─────────
+  // Free guests are limited per calendar month; Premium is unlimited (null
+  // limit). The limit lives on the membership_tiers lookup so it's tunable
+  // without a deploy. Cancelled reservations don't count against the cap.
+  const { data: consumerRow, error: consumerErr } = await admin
+    .from("consumers")
+    .select("tier_key")
+    .eq("id", consumerId)
+    .maybeSingle();
+  if (consumerErr) return json({ ok: false, error: consumerErr.message }, 500);
+
+  const tier = await getTierConfig(admin, consumerRow?.tier_key ?? "free");
+  const monthlyLimit = tier?.monthly_reservation_limit ?? null;
+  if (monthlyLimit != null) {
+    const monthStart = new Date();
+    monthStart.setUTCDate(1);
+    monthStart.setUTCHours(0, 0, 0, 0);
+    const { count, error: countErr } = await admin
+      .from("reservations")
+      .select("id", { count: "exact", head: true })
+      .eq("consumer_id", consumerId)
+      .gte("created_at", monthStart.toISOString())
+      .neq("status", "cancelled");
+    if (countErr) return json({ ok: false, error: countErr.message }, 500);
+    if ((count ?? 0) >= monthlyLimit) {
+      return json(
+        {
+          ok: false,
+          code: "reservation_limit_reached",
+          error:
+            "You've reached your monthly reservation limit. Upgrade to Mesita Premium for unlimited reservations.",
+          limit: monthlyLimit,
+          tier: consumerRow?.tier_key ?? "free",
+        },
+        409,
+      );
+    }
+  }
 
   // Look up an active coupon for this (consumer, venue) so we can link it.
   // We don't fail if none exists — the venue might be a web listing

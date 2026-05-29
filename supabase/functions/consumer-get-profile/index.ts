@@ -14,6 +14,7 @@ import {
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
+import { getTierConfig } from "../_shared/membership.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -32,7 +33,7 @@ Deno.serve(async (req) => {
   // Read once. If absent, insert with a generated code and re-read.
   const existing = await admin
     .from("consumers")
-    .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
+    .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents, tier_key, tier_origin, consumer_instagram_followers_count, tier_expires_at")
     .eq("id", userId)
     .maybeSingle();
   if (existing.error) {
@@ -51,7 +52,7 @@ Deno.serve(async (req) => {
       const inserted = await admin
         .from("consumers")
         .insert({ id: userId, code: codeResult.data as string })
-        .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
+        .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents, tier_key, tier_origin, consumer_instagram_followers_count, tier_expires_at")
         .single();
       if (!inserted.error) {
         consumer = inserted.data;
@@ -75,7 +76,7 @@ Deno.serve(async (req) => {
       .from("consumers")
       .update({ code: codeResult.data as string })
       .eq("id", userId)
-      .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents")
+      .select("id, code, full_name, first_name, last_name, sex, birthday, country, phone, cashback_balance_cents, tier_key, tier_origin, consumer_instagram_followers_count, tier_expires_at")
       .single();
     if (updated.error) {
       return json({ ok: false, error: `consumer_code_set: ${updated.error.message}` }, 500);
@@ -83,5 +84,46 @@ Deno.serve(async (req) => {
     consumer = updated.data;
   }
 
-  return json({ ok: true, consumer });
+  // ── Membership payload ─────────────────────────────────────────────────
+  // Surfaces the consumer's tier, how they earned it, their Instagram
+  // follower count, current subscription (if any), and this month's
+  // reservation usage vs their cap. The UI uses this to render the Class tab
+  // and gate the "upgrade" affordances.
+  const tier = await getTierConfig(admin, consumer.tier_key ?? "free");
+
+  const { data: subscription } = await admin
+    .from("consumer_subscriptions")
+    .select(
+      "status, price_cents, currency, current_period_end, cancel_at_period_end",
+    )
+    .eq("consumer_id", userId)
+    .in("status", ["active", "past_due"])
+    .maybeSingle();
+
+  let used = 0;
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
+  const { count } = await admin
+    .from("reservations")
+    .select("id", { count: "exact", head: true })
+    .eq("consumer_id", userId)
+    .gte("created_at", monthStart.toISOString())
+    .neq("status", "cancelled");
+  used = count ?? 0;
+
+  const membership = {
+    tier: consumer.tier_key ?? "free",
+    origin: consumer.tier_origin ?? "default",
+    label: tier?.label ?? "Free",
+    followers: consumer.consumer_instagram_followers_count ?? null,
+    expires_at: consumer.tier_expires_at ?? null,
+    subscription: subscription ?? null,
+    usage: {
+      reservations_used: used,
+      reservations_limit: tier?.monthly_reservation_limit ?? null,
+    },
+  };
+
+  return json({ ok: true, consumer, membership });
 });

@@ -158,8 +158,13 @@ Deno.serve(async (req) => {
     ranked = fallbackRank(candidates);
   }
 
-  // ── 5. Diversity + partner-first trim ──────────────────────────────
-  const deck = diversify(ranked, limit, MAX_PER_CATEGORY);
+  // ── 5. Tier boost + diversity + partner-first trim ──────────────────
+  // Premium guests get a stronger partner-first deck (a real perk: better,
+  // more rewarding recommendations). Free guests keep the pure relevance
+  // order. The boost is a stable partial reorder, so within partners /
+  // within non-partners the relevance ranking from step 4 is preserved.
+  const boosted = applyTierBoost(ranked, profile?.tier ?? null);
+  const deck = diversify(boosted, limit, MAX_PER_CATEGORY);
 
   return json({
     ok: true,
@@ -203,6 +208,9 @@ function composeIntent({
   else parts.push("dinner, cocktails, and late-night spots");
 
   if (profile?.country) parts.push(`a consumer from ${profile.country}`);
+  if (profile?.tier === "premium") {
+    parts.push("a Mesita Premium member who values standout, high-quality venues");
+  }
   if (lat != null && lng != null) parts.push(`within ${DEFAULT_RADIUS_KM}km of this location`);
 
   const topCats = topCategoriesIn(candidates, 3);
@@ -228,6 +236,20 @@ function topCategoriesIn(rows: VenueRow[], k: number): string[] {
 // ─────────────────────────────────────────────────────────────────────
 // Trim helpers
 // ─────────────────────────────────────────────────────────────────────
+
+// Premium overlay: stable partition that floats partner venues above
+// non-partners while preserving the relevance order inside each group. A
+// no-op for free / anonymous, so the deck only changes for Premium members.
+function applyTierBoost(rows: VenueRow[], tier: string | null): VenueRow[] {
+  if (tier !== "premium") return rows;
+  const partners: VenueRow[] = [];
+  const rest: VenueRow[] = [];
+  for (const r of rows) {
+    if (r.listing_type === "partner") partners.push(r);
+    else rest.push(r);
+  }
+  return [...partners, ...rest];
+}
 
 function fallbackRank(rows: VenueRow[]): VenueRow[] {
   // Partner-first, then newest. Stable when OpenAI is down.

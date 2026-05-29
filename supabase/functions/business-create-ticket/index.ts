@@ -36,6 +36,7 @@ import {
   RESERVATION_KINDS,
   STORY_KINDS,
 } from "../_shared/ticket-kinds.ts";
+import { isConsumerFirstVisit, selectVenueRate } from "../_shared/membership.ts";
 
 type Body = {
   venueId?: string;
@@ -134,7 +135,7 @@ Deno.serve(async (req) => {
   const venueRow = await admin
     .from("venues")
     .select(
-      "id, name, cashback_percent, listing_type, status, fiscal_type",
+      "id, name, cashback_percent, welcome_free_rate, welcome_premium_rate, free_rate, premium_rate, listing_type, status, fiscal_type",
     )
     .eq("id", venueId)
     .maybeSingle();
@@ -176,12 +177,10 @@ Deno.serve(async (req) => {
     );
   }
 
-  const ratePercent = Math.max(0, Math.min(100, venue.cashback_percent ?? 0));
-
   // ── Consumer lookup ──────────────────────────────────────────────────────
   const consumerRow = await admin
     .from("consumers")
-    .select("id, code, full_name, cashback_balance_cents")
+    .select("id, code, full_name, cashback_balance_cents, tier_key")
     .eq("code", consumerCode)
     .maybeSingle();
   if (consumerRow.error) {
@@ -195,6 +194,13 @@ Deno.serve(async (req) => {
   }
   const consumerId = consumerRow.data.id;
   const consumerBalance = consumerRow.data.cashback_balance_cents ?? 0;
+
+  // Tier-aware rate selection. Premium guests earn the premium rate; the
+  // "welcome" variant applies on a guest's first visit at this venue. The
+  // resolver returns only the final percent — the tier never surfaces in the
+  // ticket or any business-facing response (blended-rate privacy).
+  const firstVisit = await isConsumerFirstVisit(admin, consumerId, venueId);
+  const ratePercent = selectVenueRate(venue, consumerRow.data.tier_key, firstVisit);
 
   const total = subtotal + tip;
 

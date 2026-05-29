@@ -27,6 +27,7 @@ type ConsumerProfile = {
   country: string | null;
   birthday: string | null;
   sex: string | null;
+  tier?: string | null;
 };
 
 Deno.serve(async (req) => {
@@ -50,10 +51,13 @@ Deno.serve(async (req) => {
     if (authData.user) {
       const { data } = await userClient
         .from("consumers")
-        .select("full_name, country, birthday, sex")
+        .select("full_name, country, birthday, sex, tier_key")
         .eq("id", authData.user.id)
         .maybeSingle();
-      profile = (data as ConsumerProfile | null) ?? null;
+      if (data) {
+        const { tier_key, ...rest } = data as Record<string, unknown>;
+        profile = { ...(rest as ConsumerProfile), tier: (tier_key as string) ?? "free" };
+      }
     }
   }
 

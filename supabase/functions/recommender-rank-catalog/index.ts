@@ -53,6 +53,7 @@ type ConsumerProfile = {
   country: string | null;
   birthday: string | null;
   sex: string | null;
+  tier?: string | null;
 };
 
 type Body = {
@@ -288,6 +289,8 @@ async function proposeCategories({
     location: lat != null && lng != null ? { lat, lng } : null,
     utc_hour: now.getUTCHours(),
     weekday: now.toLocaleString("en", { weekday: "long" }),
+    // Premium members get more aspirational, standout-leaning curation.
+    membership: profile?.tier === "premium" ? "premium" : "free",
   };
 
   const system = [

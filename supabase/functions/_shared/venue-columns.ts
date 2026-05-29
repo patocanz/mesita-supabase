@@ -44,17 +44,13 @@ const COLUMNS: readonly string[] = [
   // below (welcome_*_rate / *_rate) added in migration 0027. Kept in the
   // projection until every reader switches off it.
   "cashback_percent",
-  // Eight per-tier promo rates. Welcome variants fire on a guest's first
-  // visit at the venue; the unprefixed variants apply on every visit
-  // afterwards. Legal values: 10, 20, 50, 70 (nullable).
-  "welcome_bronze_rate",
-  "welcome_silver_rate",
-  "welcome_gold_rate",
-  "welcome_diamond_rate",
-  "bronze_rate",
-  "silver_rate",
-  "gold_rate",
-  "diamond_rate",
+  // Four per-tier promo rates (free / premium). Welcome variants fire on a
+  // guest's first visit at the venue; the unprefixed variants apply on every
+  // visit afterwards. Legal values: 10, 20, 50, 70 (nullable).
+  "welcome_free_rate",
+  "welcome_premium_rate",
+  "free_rate",
+  "premium_rate",
   "photos",
   "menu_pdf_url",
   // Optional display name for menu_pdf_url, e.g. "Dinner menu" /

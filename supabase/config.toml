@@ -350,3 +350,22 @@ verify_jwt = true
 
 [functions.admin-snapshot-mesita]
 verify_jwt = true
+
+# --- Membership (Free / Premium) ---
+#
+# The three "doors" into Premium + the admin grant. consumer-* are gated by
+# the caller's JWT. stripe-handle-webhook is PUBLIC (verify_jwt = false) —
+# it's an external webhook; security is Stripe signature verification inside
+# the EF (STRIPE_WEBHOOK_SECRET), not the gateway.
+
+[functions.consumer-create-subscription]
+verify_jwt = true
+
+[functions.consumer-claim-instagram]
+verify_jwt = true
+
+[functions.admin-grant-membership]
+verify_jwt = true
+
+[functions.stripe-handle-webhook]
+verify_jwt = false
