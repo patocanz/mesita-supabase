@@ -355,6 +355,9 @@ verify_jwt = true
 [functions.admin-set-atlas-pre-read]
 verify_jwt = true
 
+[functions.admin-update-atlas-config]
+verify_jwt = true
+
 [functions.admin-snapshot-mesita]
 verify_jwt = true
 
