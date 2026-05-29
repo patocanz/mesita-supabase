@@ -35,7 +35,6 @@ type Body = {
   // Data depth
   googleReviews?: number;
   websiteCrawlMaxPages?: number;
-  reviewsPerSite?: number;
   // Analysis
   imageVisionEnabled?: boolean;
   maxImagesAnalyzed?: number;
@@ -170,14 +169,6 @@ Deno.serve(async (req) => {
     patch.atlas_website_crawl_max_pages = n;
   }
 
-  if (body.reviewsPerSite !== undefined) {
-    const n = intInRange(body.reviewsPerSite, 0, 30);
-    if (n === null) {
-      return json({ ok: false, error: "reviewsPerSite must be an integer 0-30" }, 400);
-    }
-    patch.atlas_reviews_per_site = n;
-  }
-
   // ── Analysis ──────────────────────────────────────────────────────────
   if (body.imageVisionEnabled !== undefined) {
     if (typeof body.imageVisionEnabled !== "boolean") {
@@ -231,7 +222,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -251,7 +242,6 @@ Deno.serve(async (req) => {
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasGoogleReviews: data.atlas_google_reviews,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
-    atlasReviewsPerSite: data.atlas_reviews_per_site,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
     atlasMaxImagesAnalyzed: data.atlas_max_images_analyzed,
     atlasSynthesisQuality: data.atlas_synthesis_quality,

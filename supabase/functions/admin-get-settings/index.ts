@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
   const { data, error } = await admin
     .from("app_settings")
     .select(
-      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .eq("id", 1)
     .maybeSingle();
@@ -67,7 +67,6 @@ Deno.serve(async (req) => {
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasGoogleReviews: data.atlas_google_reviews,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
-    atlasReviewsPerSite: data.atlas_reviews_per_site,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
     atlasMaxImagesAnalyzed: data.atlas_max_images_analyzed,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
