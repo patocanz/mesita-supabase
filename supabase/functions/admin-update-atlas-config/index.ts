@@ -8,7 +8,8 @@
 // save one control at a time:
 //
 //   saveSnapshots   (boolean)  → atlas_save_snapshots
-//   analyzeGoogleImages / analyzeWebsiteImages / analyzeInstagramImages
+//   analyzeGoogleImages / analyzeInstagramImages / imageAnalysisPrompt /
+//   imageSortingPrompt
 //   instagramPosts  (0-50)     → atlas_research_instagram_posts
 //
 // The separate pre-read toggle keeps its own EF (admin-set-atlas-pre-read).
@@ -37,8 +38,9 @@ type Body = {
   // Analysis
   imageVisionEnabled?: boolean;
   analyzeGoogleImages?: number;
-  analyzeWebsiteImages?: number;
   analyzeInstagramImages?: number;
+  imageAnalysisPrompt?: string;
+  imageSortingPrompt?: string;
   synthesisQuality?: string;
   perRunCostCapUsd?: number;
 };
@@ -175,12 +177,18 @@ Deno.serve(async (req) => {
     patch.atlas_analyze_google_images = n;
   }
 
-  if (body.analyzeWebsiteImages !== undefined) {
-    const n = intInRange(body.analyzeWebsiteImages, 0, 10);
-    if (n === null) {
-      return json({ ok: false, error: "analyzeWebsiteImages must be an integer 0-10" }, 400);
+  if (body.imageAnalysisPrompt !== undefined) {
+    if (typeof body.imageAnalysisPrompt !== "string" || body.imageAnalysisPrompt.length > 4000) {
+      return json({ ok: false, error: "imageAnalysisPrompt must be a string up to 4000 chars" }, 400);
     }
-    patch.atlas_analyze_website_images = n;
+    patch.atlas_image_analysis_prompt = body.imageAnalysisPrompt;
+  }
+
+  if (body.imageSortingPrompt !== undefined) {
+    if (typeof body.imageSortingPrompt !== "string" || body.imageSortingPrompt.length > 4000) {
+      return json({ ok: false, error: "imageSortingPrompt must be a string up to 4000 chars" }, 400);
+    }
+    patch.atlas_image_sorting_prompt = body.imageSortingPrompt;
   }
 
   if (body.analyzeInstagramImages !== undefined) {
@@ -225,7 +233,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -246,7 +254,8 @@ Deno.serve(async (req) => {
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
     atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
-    atlasAnalyzeWebsiteImages: data.atlas_analyze_website_images,
+    atlasImageAnalysisPrompt: data.atlas_image_analysis_prompt,
+    atlasImageSortingPrompt: data.atlas_image_sorting_prompt,
     atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
     atlasPerRunCostCapUsd: data.atlas_per_run_cost_cap_usd,
