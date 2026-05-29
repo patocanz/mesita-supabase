@@ -33,7 +33,6 @@ type Body = {
   sourceTierCeiling?: number;
   sourceOverrides?: Record<string, unknown>;
   // Data depth
-  googleReviews?: number;
   websiteCrawlMaxPages?: number;
   // Analysis
   imageVisionEnabled?: boolean;
@@ -142,14 +141,6 @@ Deno.serve(async (req) => {
   }
 
   // ── Data depth ────────────────────────────────────────────────────────
-  if (body.googleReviews !== undefined) {
-    const n = intInRange(body.googleReviews, 0, 5);
-    if (n === null) {
-      return json({ ok: false, error: "googleReviews must be an integer 0-5" }, 400);
-    }
-    patch.atlas_google_reviews = n;
-  }
-
   if (body.websiteCrawlMaxPages !== undefined) {
     const n = intInRange(body.websiteCrawlMaxPages, 1, 20);
     if (n === null) {
@@ -233,7 +224,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -250,7 +241,6 @@ Deno.serve(async (req) => {
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
-    atlasGoogleReviews: data.atlas_google_reviews,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
     atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
