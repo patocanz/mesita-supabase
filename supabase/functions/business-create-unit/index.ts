@@ -209,13 +209,32 @@ Deno.serve(async (req) => {
     );
   }
 
+  // Google Business is the spine: a venue that Google can't give a name,
+  // coordinates, and an address for is not a real listing and must NOT enter
+  // Mesita. These fields are non-nullable on the profile — reject here rather
+  // than inserting a half-null row the consumer app then has to special-case.
   const venueName = details.displayName?.text ?? "";
   if (!venueName) {
-    return json({ ok: false, error: "Place has no display name" }, 422);
+    return json(
+      { ok: false, code: "google_spine_incomplete", error: "Place has no display name on Google — can't list it." },
+      422,
+    );
+  }
+  if (details.location?.latitude == null || details.location?.longitude == null) {
+    return json(
+      { ok: false, code: "google_spine_incomplete", error: "Place has no coordinates on Google — can't list it." },
+      422,
+    );
+  }
+  const address = details.formattedAddress ?? null;
+  if (!address) {
+    return json(
+      { ok: false, code: "google_spine_incomplete", error: "Place has no address on Google — can't list it." },
+      422,
+    );
   }
   const city = findAddressComponent(details.addressComponents, ["locality", "administrative_area_level_2"]);
   const country = findAddressComponent(details.addressComponents, ["country"]);
-  const address = details.formattedAddress ?? null;
 
   // ── Step 2: Parallel enrichment (best-effort, all may individually fail) ──
   // Photo sources, in priority order:
