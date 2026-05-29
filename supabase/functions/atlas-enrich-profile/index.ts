@@ -5,15 +5,18 @@
 // summary) is produced by the natural caller (business-create-unit). This
 // agent layers every other Atlas-selected method onto the venue:
 //
+//   Perplexity  channel discovery — resolve the IG / FB / website URLs from
+//               live search (needs the web; host-validated before use).
 //   Apify       Instagram → followers + bio; Facebook → followers + rating
 //   Firecrawl   website markdown → menu grounding
-//   Perplexity  synthesized details{}, summary, zone/city, established_year,
-//               executive_chef, menus[], popular_times[] — grounded on the
-//               IG bio + Firecrawl site content so it structures real data
-//               rather than guessing.
+//   OpenAI      synthesis ("Research Backbone") — reads ONLY the gathered
+//               material (no web, so it can't drift) into the canonical
+//               profile JSON. Model from the admin 'synthesis quality' param.
 //
-// Every source is best-effort and independent; whatever fails degrades to
-// null. Photos stay Google-only upstream (Apify photos are a future source).
+// CONFIG: reads app_settings. The source tier ceiling gates which sources run
+// (Google/Mesita = spine/always; IG/FB/Website/SERP = tier 2). Every source is
+// best-effort and independent; whatever fails degrades to null. The image
+// funnel + vision ranking are a separate phase (not yet wired here).
 //
 // Agent contract: verify_jwt=false; requireInternalCaller gates the
 // service-role bearer. Invoked by business-create-unit (on create) and
@@ -32,6 +35,22 @@ import {
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
 const PERPLEXITY_MODEL = "sonar";
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape";
+const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+
+// Synthesis model by the admin 'synthesis quality' param. Synthesis reads
+// only the gathered source material (no web) — that's why it's OpenAI, not
+// Perplexity (which would re-search and drift). GPT-5.x not yet on the API,
+// so 'high' maps to the best available today.
+const QUALITY_MODEL: Record<string, string> = {
+  economy: "gpt-4o-mini",
+  standard: "gpt-4o",
+  high: "gpt-4o",
+};
+
+// Source steps beyond the Google/Mesita spine (Instagram, Facebook, Website,
+// SERP) are all tier 2 in the Atlas catalog, so the whole social/website/SERP
+// layer is gated by ceiling >= 2.
+const SOCIAL_LAYER_TIER = 2;
 
 type Body = { venue_id?: string };
 
@@ -144,7 +163,22 @@ Deno.serve(async (req) => {
     .maybeSingle();
   if (!row) return json({ ok: false, error: "Venue not found" }, 404);
 
+  // ── Admin config (app_settings) ──────────────────────────────────────────
+  // The Atlas admin console tunes these. The agent reads them at run time;
+  // callers don't pass overrides (the DB is the single source of truth).
+  const { data: cfg } = await admin
+    .from("app_settings")
+    .select("atlas_source_tier_ceiling, atlas_synthesis_quality")
+    .eq("id", 1)
+    .maybeSingle();
+  const tierCeiling = (cfg?.atlas_source_tier_ceiling as number | undefined) ?? 3;
+  const synthesisQuality =
+    (cfg?.atlas_synthesis_quality as string | undefined) ?? "economy";
+  // Whole social/website/SERP layer runs only when the ceiling allows tier 2.
+  const socialLayer = tierCeiling >= SOCIAL_LAYER_TIER;
+
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
+  const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
   const APIFY_KEY = Deno.env.get("APIFY_KEY");
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
   const SERPER_KEY = Deno.env.get("SERPER_KEY");
@@ -173,6 +207,7 @@ Deno.serve(async (req) => {
       : null;
 
   if (
+    socialLayer &&
     PERPLEXITY_KEY &&
     (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite)
   ) {
@@ -234,7 +269,7 @@ Deno.serve(async (req) => {
     // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
     // purely as extra grounding for Perplexity, never as a rating source.
     (async () => {
-      if (!SERPER_KEY || !googleThin) return;
+      if (!socialLayer || !SERPER_KEY || !googleThin) return;
       try {
         const q = [row.name, row.city].filter(Boolean).join(" ");
         const r = await fetch("https://google.serper.dev/search", {
@@ -272,7 +307,7 @@ Deno.serve(async (req) => {
     })(),
     // Apify → Instagram (followers + bio).
     (async () => {
-      if (!APIFY_KEY || !igHandle) return;
+      if (!socialLayer || !APIFY_KEY || !igHandle) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.instagramProfile,
         { usernames: [igHandle] },
@@ -290,7 +325,7 @@ Deno.serve(async (req) => {
     })(),
     // Apify → Facebook (followers + rating).
     (async () => {
-      if (!APIFY_KEY || !resolvedFacebook) return;
+      if (!socialLayer || !APIFY_KEY || !resolvedFacebook) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.facebookPages,
         { startUrls: [{ url: resolvedFacebook }] },
@@ -311,7 +346,7 @@ Deno.serve(async (req) => {
     })(),
     // Firecrawl → website markdown (menu grounding).
     (async () => {
-      if (!FIRECRAWL_KEY || !resolvedWebsite) return;
+      if (!socialLayer || !FIRECRAWL_KEY || !resolvedWebsite) return;
       try {
         const r = await fetch(FIRECRAWL_URL, {
           method: "POST",
@@ -338,10 +373,13 @@ Deno.serve(async (req) => {
     })(),
   ]);
 
-  // ── Perplexity: grounded synthesis ──────────────────────────────────────
-  if (!PERPLEXITY_KEY) {
-    return json({ ok: false, error: "PERPLEXITY_KEY not configured" }, 500);
+  // ── OpenAI: grounded synthesis (Research Backbone) ───────────────────────
+  // Reads ONLY the gathered source material — no web — so it can't drift from
+  // what we actually collected. Model picked by the admin 'synthesis quality'.
+  if (!OPENAI_KEY) {
+    return json({ ok: false, error: "OPENAI_KEY not configured" }, 500);
   }
+  const synthesisModel = QUALITY_MODEL[synthesisQuality] ?? "gpt-4o-mini";
   const locationLine = [row.address, row.city].filter(Boolean).join(", ");
   const grounding = [
     igBio ? `Instagram bio: ${igBio}` : "",
@@ -351,37 +389,40 @@ Deno.serve(async (req) => {
     .filter(Boolean)
     .join("\n\n");
   const userPrompt =
-    `Research the venue "${row.name}"` +
+    `Compile the public profile of the venue "${row.name}"` +
     (locationLine ? ` located at ${locationLine}` : "") +
     (row.category ? ` (category: ${row.category})` : "") +
-    `. Return its public profile as strict JSON matching the schema. Extract ` +
-    `the menu from the website content below when present (real dish names + ` +
-    `prices only). Use null or [] for anything you cannot verify. Never ` +
-    `invent ratings, reviewer quotes, prices, or a chef's name.` +
-    (grounding ? `\n\n--- SOURCE MATERIAL ---\n${grounding}` : "");
+    `, using ONLY the source material below. Return a single JSON object ` +
+    `matching the schema. Extract the menu from the website content when ` +
+    `present (real dish names + prices only). Use null or [] for anything the ` +
+    `sources don't support. Never invent ratings, reviewer quotes, prices, or ` +
+    `a chef's name.` +
+    (grounding ? `\n\n--- SOURCE MATERIAL ---\n${grounding}` : "\n\n(No extra source material was gathered.)");
+
+  const systemContent =
+    "You are Mesita's venue-intelligence synthesis agent. Use ONLY the source " +
+    "material the user provides — do not browse or use outside knowledge. " +
+    "Output a SINGLE valid JSON object (no prose, no markdown fences) matching " +
+    "this shape, using null or [] when the sources don't support a field: " +
+    JSON.stringify(PROFILE_SCHEMA.properties) +
+    " Never invent ratings, reviewer quotes, prices, or a chef's name.";
 
   let parsed: ProfileResult | null = null;
   try {
-    const r = await fetch(PERPLEXITY_URL, {
+    const r = await fetch(OPENAI_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${PERPLEXITY_KEY}`,
+        Authorization: `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: PERPLEXITY_MODEL,
+        model: synthesisModel,
+        temperature: 0.2,
         messages: [
-          {
-            role: "system",
-            content:
-              "You are Mesita's venue-intelligence agent. Output only valid JSON matching the provided schema — no prose, no markdown fences. Prefer null/empty over guessing.",
-          },
+          { role: "system", content: systemContent },
           { role: "user", content: userPrompt },
         ],
-        response_format: {
-          type: "json_schema",
-          json_schema: { schema: PROFILE_SCHEMA },
-        },
+        response_format: { type: "json_object" },
       }),
     });
     if (r.ok) {
@@ -389,12 +430,17 @@ Deno.serve(async (req) => {
         choices?: { message?: { content?: string } }[];
       };
       parsed = safeParseProfile(data.choices?.[0]?.message?.content ?? "");
-      sources.perplexity = { model: PERPLEXITY_MODEL, ok: !!parsed };
+      sources.synthesis = { provider: "openai", model: synthesisModel, ok: !!parsed };
     } else {
-      sources.perplexity = { ok: false, status: r.status };
+      sources.synthesis = {
+        provider: "openai",
+        model: synthesisModel,
+        ok: false,
+        status: r.status,
+      };
     }
   } catch {
-    sources.perplexity = { ok: false };
+    sources.synthesis = { provider: "openai", model: synthesisModel, ok: false };
   }
 
   if (parsed) {
