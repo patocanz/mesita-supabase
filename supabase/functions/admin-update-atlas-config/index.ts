@@ -29,7 +29,6 @@ type Body = {
   snapshotOnBusinessEdit?: boolean;
   googleImages?: number;
   instagramPosts?: number;
-  facebookPosts?: number;
   // Sourcing
   sourceTierCeiling?: number;
   sourceOverrides?: Record<string, unknown>;
@@ -126,17 +125,6 @@ Deno.serve(async (req) => {
       );
     }
     patch.atlas_research_instagram_posts = n;
-  }
-
-  if (body.facebookPosts !== undefined) {
-    const n = intInRange(body.facebookPosts, 0, 50);
-    if (n === null) {
-      return json(
-        { ok: false, error: "facebookPosts must be an integer 0-50" },
-        400,
-      );
-    }
-    patch.atlas_research_facebook_posts = n;
   }
 
   // ── Sourcing ──────────────────────────────────────────────────────────
@@ -243,7 +231,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_research_facebook_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -259,7 +247,6 @@ Deno.serve(async (req) => {
     atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
     atlasResearchGoogleImages: data.atlas_research_google_images,
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
-    atlasResearchFacebookPosts: data.atlas_research_facebook_posts,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasGoogleReviews: data.atlas_google_reviews,
