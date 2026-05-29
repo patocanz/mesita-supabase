@@ -157,7 +157,7 @@ Deno.serve(async (req) => {
   const { data: row } = await admin
     .from("venues")
     .select(
-      "name, address, city, category, instagram_url, facebook_url, website_url, google_stars_overall, google_review_count, editorial_summary",
+      "name, address, city, category, instagram_url, facebook_url, website_url, google_place_id, google_stars_overall, google_review_count, editorial_summary",
     )
     .eq("id", venueId)
     .maybeSingle();
@@ -263,9 +263,58 @@ Deno.serve(async (req) => {
   let igBio = "";
   let siteMarkdown = "";
   let serperText = "";
+  let googleReviewsText = "";
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
+  const placeId =
+    typeof row.google_place_id === "string" ? row.google_place_id : null;
 
   await Promise.all([
+    // Apify Google Maps → ALL reviews (Places caps at ~5). Spine-tier, so it
+    // runs regardless of the social layer. Capped at 100 for the EF wall-clock
+    // (a safety bound, not a product cap — the profile only needs a sample).
+    (async () => {
+      if (!APIFY_KEY || !placeId) return;
+      const items = await runApifyActor<Record<string, unknown>>(
+        APIFY_ACTORS.googleMaps,
+        {
+          placeIds: [placeId],
+          maxReviews: 100,
+          language: "es",
+          reviewsSort: "newest",
+          scrapeReviewsPersonalData: false,
+        },
+        APIFY_KEY,
+        60000,
+      );
+      const p = items?.[0] as Record<string, unknown> | undefined;
+      const raw = Array.isArray(p?.reviews) ? (p!.reviews as Record<string, unknown>[]) : [];
+      const reviews = raw
+        .slice(0, 100)
+        .map((r) => ({
+          author: typeof r.name === "string" ? r.name : null,
+          rating: numOf(r.stars),
+          text: typeof r.text === "string" ? r.text : null,
+          published:
+            typeof r.publishedAtDate === "string"
+              ? r.publishedAtDate
+              : typeof r.publishAt === "string"
+                ? r.publishAt
+                : null,
+        }))
+        .filter((r) => r.text || r.rating != null);
+      if (reviews.length > 0) {
+        update.google_reviews = reviews;
+        const cnt = numOf(p?.reviewsCount);
+        if (cnt != null) update.google_review_count = cnt;
+        googleReviewsText = reviews
+          .slice(0, 12)
+          .map((r) => (r.text ? `(${r.rating ?? "?"}★) ${r.text}` : ""))
+          .filter(Boolean)
+          .join("\n")
+          .slice(0, 3000);
+      }
+      sources.apify_google_reviews = { ok: reviews.length > 0, count: reviews.length };
+    })(),
     // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
     // purely as extra grounding for Perplexity, never as a rating source.
     (async () => {
@@ -383,6 +432,7 @@ Deno.serve(async (req) => {
   const locationLine = [row.address, row.city].filter(Boolean).join(", ");
   const grounding = [
     igBio ? `Instagram bio: ${igBio}` : "",
+    googleReviewsText ? `Google reviews (sample):\n${googleReviewsText}` : "",
     serperText ? `Search results:\n${serperText}` : "",
     siteMarkdown ? `Website content (excerpt):\n${siteMarkdown}` : "",
   ]
