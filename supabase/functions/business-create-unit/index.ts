@@ -13,6 +13,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { isOnDomain } from "../_shared/onboarding.ts";
+import { invokeArtificialCaller } from "../_shared/internal.ts";
 
 const GOOGLE_FIELD_MASK = [
   "id",
@@ -36,6 +37,7 @@ const GOOGLE_FIELD_MASK = [
   "editorialSummary",
   "generativeSummary",
   "reviewSummary",
+  "reviews",
   "photos",
 ].join(",");
 
@@ -104,6 +106,15 @@ type GoogleDetails = {
   editorialSummary?: { text?: string };
   generativeSummary?: { overview?: { text?: string }; description?: { text?: string } };
   reviewSummary?: { text?: { text?: string } };
+  // Up to 5 real reviews from Google Place Details. Mapped into the
+  // google_reviews jsonb column — real authors/ratings/quotes only.
+  reviews?: {
+    rating?: number;
+    text?: { text?: string };
+    originalText?: { text?: string };
+    relativePublishTimeDescription?: string;
+    authorAttribution?: { displayName?: string };
+  }[];
   photos?: { name?: string; widthPx?: number; heightPx?: number; authorAttributions?: { displayName?: string }[] }[];
 };
 
@@ -408,6 +419,11 @@ Deno.serve(async (req) => {
     // Google + Instagram values come straight from the enrichment pass.
     google_stars_overall: details.rating ?? null,
     google_review_count: details.userRatingCount ?? null,
+    // Real reviews straight from Google Place Details (up to 5). Qualitative
+    // profile fields (details{}, summary, menus, popular_times) are filled
+    // separately by the atlas-enrich-profile agent after insert.
+    google_reviews: mapGoogleReviews(details.reviews),
+    editorial_summary: details.editorialSummary?.text ?? null,
     instagram_followers_count: instagramFollowers,
   };
 
@@ -458,12 +474,39 @@ Deno.serve(async (req) => {
   // claim — until then, the venue is publicly listed but unowned, and
   // the caller can't manage anything on it.
 
+  // One-run completion: hand the fresh venue to the profile-enricher agent
+  // so the qualitative fields (details{}, summary, menus, popular times,
+  // zone/city, established_year, executive_chef) land before we return.
+  // Best-effort — the venue already exists; a failed/timed-out enrich just
+  // leaves those nullable fields empty (admin-enrich-venue can re-run).
+  let profileEnrichError: string | null = null;
+  if (SUPABASE_URL && ANON_KEY && SERVICE_KEY) {
+    try {
+      const enrichRes = await invokeArtificialCaller(
+        { url: SUPABASE_URL, anonKey: ANON_KEY, serviceKey: SERVICE_KEY },
+        "business-create-unit",
+        "atlas-enrich-profile",
+        {
+          venue_id: venue.id,
+          name: venue.name,
+          address,
+          category: insertRow.category,
+        },
+      );
+      if (!enrichRes.ok) profileEnrichError = enrichRes.error;
+    } catch (err) {
+      profileEnrichError = err instanceof Error ? err.message : "enrich_failed";
+    }
+  }
+
   return json(
     {
       ok: true,
       venue,
       enrichment: {
         google: true,
+        profileEnriched: !profileEnrichError,
+        profileEnrichError,
         // photoCount = persisted count after the vision-rank cap (was the
         // raw merge count before ranking shipped). Kept under the same key
         // so existing admin tooling doesn't break.
@@ -485,6 +528,25 @@ Deno.serve(async (req) => {
     201,
   );
 });
+
+// Maps Google Place Details reviews (up to 5) into the google_reviews jsonb
+// shape the consumer venue-detail modal renders: { author, rating, quote,
+// date }. Returns null when Google returned no reviews so the column stays
+// honestly empty rather than [].
+function mapGoogleReviews(
+  reviews: GoogleDetails["reviews"],
+): { author: string; rating: number; quote: string; date: string }[] | null {
+  if (!Array.isArray(reviews) || reviews.length === 0) return null;
+  const mapped = reviews
+    .map((r) => ({
+      author: r.authorAttribution?.displayName ?? "Google reviewer",
+      rating: typeof r.rating === "number" ? r.rating : 0,
+      quote: (r.text?.text ?? r.originalText?.text ?? "").trim(),
+      date: r.relativePublishTimeDescription ?? "",
+    }))
+    .filter((r) => r.quote.length > 0);
+  return mapped.length > 0 ? mapped : null;
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Google Places

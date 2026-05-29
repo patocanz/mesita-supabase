@@ -358,6 +358,10 @@ verify_jwt = true
 [functions.admin-snapshot-mesita]
 verify_jwt = true
 
+# Re-run the profile enricher on an existing venue (super-admin only).
+[functions.admin-enrich-venue]
+verify_jwt = true
+
 # --- Membership (Free / Premium) ---
 #
 # The three "doors" into Premium + the admin grant. consumer-* are gated by
