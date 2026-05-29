@@ -40,7 +40,6 @@ type Body = {
   // Analysis
   imageVisionEnabled?: boolean;
   maxImagesAnalyzed?: number;
-  perSourceAiSummary?: boolean;
   synthesisQuality?: string;
   perRunCostCapUsd?: number;
 };
@@ -210,13 +209,6 @@ Deno.serve(async (req) => {
     patch.atlas_max_images_analyzed = n;
   }
 
-  if (body.perSourceAiSummary !== undefined) {
-    if (typeof body.perSourceAiSummary !== "boolean") {
-      return json({ ok: false, error: "perSourceAiSummary must be a boolean" }, 400);
-    }
-    patch.atlas_per_source_ai_summary = body.perSourceAiSummary;
-  }
-
   if (body.synthesisQuality !== undefined) {
     if (
       typeof body.synthesisQuality !== "string" ||
@@ -251,7 +243,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_research_facebook_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_per_source_ai_summary, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_research_facebook_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -275,7 +267,6 @@ Deno.serve(async (req) => {
     atlasReviewsPerSite: data.atlas_reviews_per_site,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
     atlasMaxImagesAnalyzed: data.atlas_max_images_analyzed,
-    atlasPerSourceAiSummary: data.atlas_per_source_ai_summary,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
     atlasPerRunCostCapUsd: data.atlas_per_run_cost_cap_usd,
     updatedAt: data.updated_at,
