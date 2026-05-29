@@ -129,10 +129,10 @@ Deno.serve(async (req) => {
 
   // ── Sourcing ──────────────────────────────────────────────────────────
   if (body.sourceTierCeiling !== undefined) {
-    const n = intInRange(body.sourceTierCeiling, 1, 5);
+    const n = intInRange(body.sourceTierCeiling, 1, 4);
     if (n === null) {
       return json(
-        { ok: false, error: "sourceTierCeiling must be an integer 1-5" },
+        { ok: false, error: "sourceTierCeiling must be an integer 1-4" },
         400,
       );
     }
