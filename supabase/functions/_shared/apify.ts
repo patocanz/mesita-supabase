@@ -13,6 +13,9 @@ const APIFY_BASE = "https://api.apify.com/v2/acts";
 export const APIFY_ACTORS = {
   instagramProfile: "apify~instagram-profile-scraper",
   facebookPages: "apify~facebook-pages-scraper",
+  // Google Maps scraper — the depth Google's official API rations: ALL
+  // reviews (Places caps at ~5) + popular_times, in one run.
+  googleMaps: "compass~crawler-google-places",
 } as const;
 
 // Runs an actor synchronously and returns its dataset items. Capped so a
