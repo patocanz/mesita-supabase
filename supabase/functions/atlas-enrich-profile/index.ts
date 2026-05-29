@@ -1,28 +1,35 @@
 // Supabase Edge Function — atlas-enrich-profile (artificial caller / agent)
 //
-// The multi-source "fill the gaps" half of one-run profile generation. The
-// Google spine (core fields, photos, rating, hours, reviews, editorial
-// summary) is produced by the natural caller (business-create-unit). This
-// agent layers every other Atlas-selected method onto the venue:
+// Atlas is THE caller/orchestrator for venue profile enrichment. The natural
+// caller (business-create-unit) seeds the venue from Google Places, then hands
+// it to this agent, which runs the full Atlas pipeline end to end:
 //
-//   Perplexity  channel discovery — resolve the IG / FB / website URLs from
-//               live search (needs the web; host-validated before use).
-//   Apify       Instagram → followers + bio; Facebook → followers + rating
-//   Firecrawl   website markdown → menu grounding
-//   OpenAI      synthesis ("Research Backbone") — reads ONLY the gathered
-//               material (no web, so it can't drift) into the canonical
-//               profile JSON. Model from the admin 'synthesis quality' param.
+//   ① SOURCES (tier-gated)   Perplexity channel discovery → Apify (Google Maps
+//                            reviews+photos, Instagram, Facebook) → Firecrawl
+//                            website. Google/Mesita = spine (always); the
+//                            social/website/SERP layer is gated by tier ≥ 2.
+//   ② IMAGE FUNNEL           gather per source → SAVE (pre-select, per-source
+//                            caps, ≤50 total) → ANALYZE (vision describes each)
+//                            → SORT (text model ranks by the experience rubric)
+//                            → write the ordered photo set.
+//   ③ SYNTHESIS              OpenAI "Research Backbone" — reads ONLY the gathered
+//                            material (no web → can't drift) into the canonical
+//                            profile JSON. Model from the 'synthesis quality' param.
+//   ④ SNAPSHOTS + COST CAP   pre-read the latest snapshot to skip fresh sources
+//                            (only fetch the gaps), save every run as a new
+//                            append-only snapshot in Storage, and stop spending
+//                            once the per-run USD cap is hit.
 //
-// CONFIG: reads app_settings. The source tier ceiling gates which sources run
-// (Google/Mesita = spine/always; IG/FB/Website/SERP = tier 2). Every source is
-// best-effort and independent; whatever fails degrades to null. The image
-// funnel + vision ranking are a separate phase (not yet wired here).
+// CONFIG: every knob lives in app_settings and is read at run time (the DB is
+// the single source of truth; callers don't pass overrides). Every source is
+// best-effort and independent; whatever fails degrades to null.
 //
 // Agent contract: verify_jwt=false; requireInternalCaller gates the
 // service-role bearer. Invoked by business-create-unit (on create) and
 // admin-enrich-venue (re-run). Writes the venue row + enrichment_sources.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { adminClient, readEFEnv } from "../_shared/auth.ts";
 import { requireInternalCaller } from "../_shared/internal.ts";
@@ -37,10 +44,14 @@ const PERPLEXITY_MODEL = "sonar";
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
-// Synthesis model by the admin 'synthesis quality' param. Synthesis reads
-// only the gathered source material (no web) — that's why it's OpenAI, not
-// Perplexity (which would re-search and drift). GPT-5.x not yet on the API,
-// so 'high' maps to the best available today.
+// Vision + sort always run on the cheap multimodal model — image work doesn't
+// need the synthesis-quality tier (which governs only the profile text model).
+const VISION_MODEL = "gpt-4o-mini";
+
+// Synthesis model by the admin 'synthesis quality' param. Synthesis reads only
+// the gathered source material (no web) — that's why it's OpenAI, not Perplexity
+// (which would re-search and drift). GPT-5.x not yet on the API, so 'high' maps
+// to the best available today.
 const QUALITY_MODEL: Record<string, string> = {
   economy: "gpt-4o-mini",
   standard: "gpt-4o",
@@ -51,6 +62,28 @@ const QUALITY_MODEL: Record<string, string> = {
 // SERP) are all tier 2 in the Atlas catalog, so the whole social/website/SERP
 // layer is gated by ceiling >= 2.
 const SOCIAL_LAYER_TIER = 2;
+
+// Hard ceiling on photos persisted to the venue, regardless of per-source caps.
+const PHOTO_CEILING = 50;
+
+// Snapshots: the Storage bucket + how long a snapshot is fresh enough that a
+// pre-read can reuse it (skip the external fetch) instead of re-scraping.
+const SNAPSHOT_BUCKET = "atlas-snapshots";
+const SNAPSHOT_REUSE_DAYS = 14;
+
+// Rough per-call cost estimates (USD). Approximate but enough to make the
+// per-run cap meaningful — it's a safety valve, not billing.
+const COST = {
+  compass: 0.05, // Apify Google Maps (reviews + images)
+  instagram: 0.02, // Apify IG profile scraper
+  facebook: 0.02, // Apify FB pages scraper
+  firecrawl: 0.01, // Firecrawl scrape
+  perplexity: 0.01, // Perplexity sonar / Serper
+  synthesisEconomy: 0.005, // gpt-4o-mini synthesis
+  synthesisStandard: 0.03, // gpt-4o synthesis
+  visionPerImage: 0.002, // gpt-4o-mini vision, one image (detail:low)
+  sort: 0.003, // gpt-4o-mini text sort
+} as const;
 
 type Body = { venue_id?: string };
 
@@ -133,6 +166,32 @@ type ProfileResult = {
   popular_times?: unknown[] | null;
 };
 
+// One photo candidate + which source it came from (drives the per-source
+// analyze caps in the funnel).
+type Img = { url: string; source: "google" | "website" | "instagram" };
+
+// What a snapshot persists — the raw gathered material, so a pre-read can
+// reuse it without re-hitting the external APIs.
+type Gathered = {
+  reviews?: Record<string, unknown>[];
+  reviewCount?: number | null;
+  googleReviewsText?: string;
+  igBio?: string;
+  igFollowers?: number | null;
+  fbFollowers?: number | null;
+  fbRating?: number | null;
+  siteMarkdown?: string;
+  serperText?: string;
+  googleImages?: string[];
+  websiteImages?: string[];
+  instagramImages?: string[];
+  discovery?: {
+    instagram_url: string | null;
+    facebook_url: string | null;
+    website_url: string | null;
+  };
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
@@ -169,15 +228,48 @@ Deno.serve(async (req) => {
   const { data: cfg } = await admin
     .from("app_settings")
     .select(
-      "atlas_source_tier_ceiling, atlas_synthesis_quality, atlas_save_instagram_images",
+      [
+        "atlas_source_tier_ceiling",
+        "atlas_synthesis_quality",
+        "atlas_pre_read_snapshots",
+        "atlas_save_snapshots",
+        "atlas_save_google_images",
+        "atlas_save_website_images",
+        "atlas_save_instagram_images",
+        "atlas_image_vision_enabled",
+        "atlas_analyze_google_images",
+        "atlas_analyze_website_images",
+        "atlas_analyze_instagram_images",
+        "atlas_image_analysis_prompt",
+        "atlas_image_sorting_prompt",
+        "atlas_per_run_cost_cap_usd",
+        "atlas_website_crawl_max_pages",
+      ].join(", "),
     )
     .eq("id", 1)
     .maybeSingle();
-  const tierCeiling = (cfg?.atlas_source_tier_ceiling as number | undefined) ?? 3;
+
+  const num = (v: unknown, d: number) =>
+    typeof v === "number" && Number.isFinite(v) ? v : d;
+  const tierCeiling = num(cfg?.atlas_source_tier_ceiling, 3);
   const synthesisQuality =
     (cfg?.atlas_synthesis_quality as string | undefined) ?? "economy";
-  const saveInstagramImages =
-    (cfg?.atlas_save_instagram_images as number | undefined) ?? 20;
+  const preReadSnapshots = (cfg?.atlas_pre_read_snapshots as boolean) ?? true;
+  const saveSnapshots = (cfg?.atlas_save_snapshots as boolean) ?? true;
+  const saveGoogleImages = num(cfg?.atlas_save_google_images, 10);
+  const saveWebsiteImages = num(cfg?.atlas_save_website_images, 10);
+  const saveInstagramImages = num(cfg?.atlas_save_instagram_images, 20);
+  const visionEnabled = (cfg?.atlas_image_vision_enabled as boolean) ?? true;
+  const analyzeGoogleImages = num(cfg?.atlas_analyze_google_images, 5);
+  const analyzeWebsiteImages = num(cfg?.atlas_analyze_website_images, 5);
+  const analyzeInstagramImages = num(cfg?.atlas_analyze_instagram_images, 10);
+  const imageAnalysisPrompt =
+    (cfg?.atlas_image_analysis_prompt as string | undefined)?.trim() ||
+    "Describe this venue photo: subject (ambiance / interior / exterior / food / people / detail), visual quality, lighting, and whether it is representative and appealing. Be concise and factual.";
+  const imageSortingPrompt =
+    (cfg?.atlas_image_sorting_prompt as string | undefined)?.trim() ||
+    "Rank these venue photos best to worst for a should-we-go-tonight decision. We sell EXPERIENCES: weight beautiful place / ambiance / vibe shots EQUALLY with food. Favor visual quality, representativeness, and a balanced mix. Drop duplicates, blurry, dark, or text-heavy images.";
+  const costCapUsd = num(Number(cfg?.atlas_per_run_cost_cap_usd), 1.0) || 1.0;
   // Whole social/website/SERP layer runs only when the ceiling allows tier 2.
   const socialLayer = tierCeiling >= SOCIAL_LAYER_TIER;
 
@@ -190,13 +282,44 @@ Deno.serve(async (req) => {
   const sources: Record<string, unknown> = {};
   const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
 
+  // ── Cost cap (Phase 4) ───────────────────────────────────────────────────
+  // Reserve budget BEFORE running each step, in priority order. A step that
+  // doesn't fit the remaining budget is disabled (skipped) — so the run never
+  // exceeds the per-run USD cap. Reused-from-snapshot steps cost nothing.
+  let plannedUsd = 0;
+  const cost: Record<string, number> = {};
+  const reserve = (label: string, c: number): boolean => {
+    if (plannedUsd + c > costCapUsd) return false;
+    plannedUsd += c;
+    cost[label] = c;
+    return true;
+  };
+
+  // ── Snapshot pre-read (Phase 4) ──────────────────────────────────────────
+  // Read the venue's latest snapshot; when it's fresh, reuse its gathered
+  // material and skip the matching external fetch — "only fetch the gaps".
+  let prior: Gathered | null = null;
+  if (preReadSnapshots) {
+    const snap = await loadLatestSnapshot(admin, venueId);
+    if (snap && snap.ageDays <= SNAPSHOT_REUSE_DAYS) {
+      prior = snap.gathered;
+      sources.snapshot_read = { ok: true, age_days: Math.round(snap.ageDays) };
+    } else {
+      sources.snapshot_read = { ok: false, found: !!snap };
+    }
+  }
+
+  const reuseGoogle = !!(prior && (prior.reviews?.length || prior.googleImages?.length));
+  const reuseIg = !!(prior && (prior.igBio || prior.igFollowers != null || prior.instagramImages?.length));
+  const reuseFb = !!(prior && prior.fbFollowers != null);
+  const reuseSite = !!(prior && prior.siteMarkdown);
+  const reuseSerper = !!(prior && prior.serperText);
+  const reuseDiscovery = !!(prior && prior.discovery);
+
   // ── Channel discovery ────────────────────────────────────────────────────
   // The columns may already carry socials harvested from the venue's website
-  // at create time (business-create-unit walks the site's outbound links).
-  // But that only works when the site links its own socials — many don't. So
-  // for any channel still missing, ask Perplexity to resolve the canonical
-  // URL from search, then host-validate it before trusting it: an LLM must
-  // never hand us a fabricated handle we'd waste an Apify run scraping.
+  // at create time. For any channel still missing, ask Perplexity to resolve
+  // the canonical URL from search, then host-validate it before trusting it.
   let resolvedInstagram =
     typeof row.instagram_url === "string" && row.instagram_url
       ? row.instagram_url
@@ -210,28 +333,45 @@ Deno.serve(async (req) => {
       ? row.website_url
       : null;
 
-  if (
+  // Reuse discovered channels from the snapshot first.
+  if (reuseDiscovery && prior?.discovery) {
+    resolvedInstagram = resolvedInstagram ?? prior.discovery.instagram_url;
+    resolvedFacebook = resolvedFacebook ?? prior.discovery.facebook_url;
+    resolvedWebsite = resolvedWebsite ?? prior.discovery.website_url;
+    sources.discovery = { reused: true };
+  }
+
+  let discovered: Gathered["discovery"] = reuseDiscovery
+    ? prior?.discovery
+    : undefined;
+
+  // Synthesis is core — reserve it first so the profile always gets written.
+  const synthCost =
+    synthesisQuality === "economy"
+      ? COST.synthesisEconomy
+      : COST.synthesisStandard;
+  const runSynthesis = !!OPENAI_KEY && reserve("synthesis", synthCost);
+
+  const needsDiscovery =
     socialLayer &&
-    PERPLEXITY_KEY &&
-    (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite)
-  ) {
+    !!PERPLEXITY_KEY &&
+    !reuseDiscovery &&
+    (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite);
+  const runDiscovery = needsDiscovery && reserve("discovery", COST.perplexity);
+
+  if (runDiscovery) {
     const discoveryLocation = [row.address, row.city].filter(Boolean).join(", ");
     const found = await discoverChannels(
-      PERPLEXITY_KEY,
+      PERPLEXITY_KEY!,
       row.name as string,
       discoveryLocation,
       (row.category as string | null) ?? null,
     );
     if (found) {
-      if (!resolvedInstagram && found.instagram_url) {
-        resolvedInstagram = found.instagram_url;
-      }
-      if (!resolvedFacebook && found.facebook_url) {
-        resolvedFacebook = found.facebook_url;
-      }
-      if (!resolvedWebsite && found.website_url) {
-        resolvedWebsite = found.website_url;
-      }
+      if (!resolvedInstagram && found.instagram_url) resolvedInstagram = found.instagram_url;
+      if (!resolvedFacebook && found.facebook_url) resolvedFacebook = found.facebook_url;
+      if (!resolvedWebsite && found.website_url) resolvedWebsite = found.website_url;
+      discovered = found;
       sources.discovery = {
         ok: true,
         instagram: !!found.instagram_url,
@@ -254,86 +394,118 @@ Deno.serve(async (req) => {
     update.website_url = resolvedWebsite;
   }
 
-  // Only reach for Serper when Google Places came back thin — no rating, no
-  // editorial summary, or no website. Otherwise the Google spine already
-  // covers the SERP-level facts and we skip the extra call.
+  // Only reach for Serper when Google Places came back thin.
   const googleThin =
     row.google_stars_overall == null ||
     !row.editorial_summary ||
     !resolvedWebsite;
 
-  // The external lookups are independent — run them concurrently so a slow
-  // actor doesn't stack latency and push the agent past the EF wall.
-  let igBio = "";
-  let siteMarkdown = "";
-  let serperText = "";
-  let googleReviewsText = "";
-  let igImageUrls: string[] = [];
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
   const placeId =
     typeof row.google_place_id === "string" ? row.google_place_id : null;
 
+  // ── Reserve budget for the gather steps (priority: reviews → IG → website →
+  //    vision → FB → serper). Anything that doesn't fit is skipped. ──────────
+  const runReviews =
+    !reuseGoogle && !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
+  const runInstagram =
+    !reuseIg && socialLayer && !!APIFY_KEY && !!igHandle && reserve("apify_instagram", COST.instagram);
+  const runWebsite =
+    !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite && reserve("firecrawl", COST.firecrawl);
+  const maxVisionImages = visionEnabled
+    ? analyzeGoogleImages + analyzeWebsiteImages + analyzeInstagramImages
+    : 0;
+  const runVision =
+    visionEnabled &&
+    !!OPENAI_KEY &&
+    maxVisionImages > 0 &&
+    reserve("vision", maxVisionImages * COST.visionPerImage + COST.sort);
+  const runFacebook =
+    !reuseFb && socialLayer && !!APIFY_KEY && !!resolvedFacebook && reserve("apify_facebook", COST.facebook);
+  const runSerper =
+    !reuseSerper && socialLayer && !!SERPER_KEY && googleThin && reserve("serper", COST.perplexity);
+
+  // ── Gather (concurrent) ──────────────────────────────────────────────────
+  // Seed reused material from the snapshot first, then run only the live
+  // fetches that weren't reused or budget-capped.
+  let igBio = prior?.igBio ?? "";
+  let igFollowers: number | null = prior?.igFollowers ?? null;
+  let fbFollowers: number | null = prior?.fbFollowers ?? null;
+  let fbRating: number | null = prior?.fbRating ?? null;
+  let siteMarkdown = prior?.siteMarkdown ?? "";
+  let serperText = prior?.serperText ?? "";
+  let googleReviewsText = prior?.googleReviewsText ?? "";
+  let reviews: Record<string, unknown>[] = prior?.reviews ?? [];
+  let reviewCount: number | null = prior?.reviewCount ?? null;
+  let googleImages: string[] = prior?.googleImages ?? [];
+  let websiteImages: string[] = prior?.websiteImages ?? [];
+  let instagramImages: string[] = prior?.instagramImages ?? [];
+
+  if (reuseGoogle) sources.apify_google_reviews = { reused: true, count: reviews.length };
+  if (reuseIg) sources.apify_instagram = { reused: true };
+  if (reuseFb) sources.apify_facebook = { reused: true };
+  if (reuseSite) sources.firecrawl = { reused: true };
+  if (reuseSerper) sources.serper = { reused: true };
+
   await Promise.all([
-    // Apify Google Maps → ALL reviews (Places caps at ~5). Spine-tier, so it
-    // runs regardless of the social layer. Capped at 100 for the EF wall-clock
-    // (a safety bound, not a product cap — the profile only needs a sample).
+    // Apify Google Maps → ALL reviews (Places caps at ~5) + venue PHOTOS in one
+    // run. Spine-tier. maxImages drives the Google image bucket; reviews capped
+    // at 100 for the EF wall-clock (a safety bound, not a product cap).
     (async () => {
-      if (!APIFY_KEY || !placeId) return;
+      if (!runReviews) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.googleMaps,
         {
           placeIds: [placeId],
           maxReviews: 100,
+          maxImages: Math.max(0, saveGoogleImages),
           language: "es",
           reviewsSort: "newest",
-          // include reviewer name + text (don't strip personal data)
           reviewsPersonalData: true,
         },
-        APIFY_KEY,
+        APIFY_KEY!,
         60000,
       );
       const p = items?.[0] as Record<string, unknown> | undefined;
       const raw = Array.isArray(p?.reviews) ? (p!.reviews as Record<string, unknown>[]) : [];
       const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
-      const reviews = raw
+      reviews = raw
         .slice(0, 100)
         .map((r) => ({
           author: str(r.name) ?? str(r.reviewerName),
           rating: numOf(r.stars) ?? numOf(r.rating) ?? numOf(r.starRating),
           text: str(r.text) ?? str(r.textTranslated) ?? str(r.reviewText),
-          published:
-            str(r.publishedAtDate) ?? str(r.publishAt) ?? str(r.publishedAt),
+          published: str(r.publishedAtDate) ?? str(r.publishAt) ?? str(r.publishedAt),
         }))
         .filter((r) => r.text || r.rating != null);
-      if (reviews.length > 0) {
-        update.google_reviews = reviews;
-        const cnt = numOf(p?.reviewsCount);
-        if (cnt != null) update.google_review_count = cnt;
-        const withText = reviews.filter((r) => r.text);
-        googleReviewsText = withText
-          .slice(0, 12)
-          .map((r) => `(${r.rating ?? "?"}★) ${r.text}`)
-          .join("\n")
-          .slice(0, 3000);
-      }
-      // Debug: capture the raw field names of the first review so a wrong
-      // mapping is diagnosable from enrichment_sources without re-instrumenting.
+      reviewCount = numOf(p?.reviewsCount);
+      const withText = reviews.filter((r) => r.text);
+      googleReviewsText = withText
+        .slice(0, 12)
+        .map((r) => `(${r.rating ?? "?"}★) ${r.text}`)
+        .join("\n")
+        .slice(0, 3000);
+      // Google photos straight from the same run (durable lh3 URLs).
+      const imgs = Array.isArray(p?.imageUrls) ? (p!.imageUrls as unknown[]) : [];
+      googleImages = imgs
+        .filter((u): u is string => typeof u === "string" && u.startsWith("http"))
+        .slice(0, saveGoogleImages);
       sources.apify_google_reviews = {
         ok: reviews.length > 0,
         count: reviews.length,
-        with_text: reviews.filter((r) => r.text).length,
+        with_text: withText.length,
+        images: googleImages.length,
         sample_keys: raw[0] ? Object.keys(raw[0]).slice(0, 25) : [],
       };
     })(),
-    // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
-    // purely as extra grounding for Perplexity, never as a rating source.
+    // Serper → SERP knowledge panel, ONLY when Google came back thin.
     (async () => {
-      if (!socialLayer || !SERPER_KEY || !googleThin) return;
+      if (!runSerper) return;
       try {
         const q = [row.name, row.city].filter(Boolean).join(" ");
         const r = await fetch("https://google.serper.dev/search", {
           method: "POST",
-          headers: { "X-API-KEY": SERPER_KEY, "Content-Type": "application/json" },
+          headers: { "X-API-KEY": SERPER_KEY!, "Content-Type": "application/json" },
           body: JSON.stringify({ q, gl: "mx", hl: "es" }),
         });
         if (!r.ok) {
@@ -366,24 +538,20 @@ Deno.serve(async (req) => {
     })(),
     // Apify → Instagram: followers + bio + post IMAGES (top by likes).
     (async () => {
-      if (!socialLayer || !APIFY_KEY || !igHandle) return;
+      if (!runInstagram) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.instagramProfile,
         { usernames: [igHandle] },
-        APIFY_KEY,
+        APIFY_KEY!,
       );
       const p = items?.[0];
       if (p) {
-        const followers = numOf(p.followersCount);
-        if (followers != null) update.instagram_followers_count = followers;
+        igFollowers = numOf(p.followersCount);
         if (typeof p.biography === "string") igBio = p.biography;
-        // Post images: profile scraper bundles latestPosts. Keep images only
-        // (drop videos), rank by likes, take top N (save cap). Sorting/vision
-        // happens elsewhere — here we just gather + rank the candidates.
         const posts = Array.isArray(p.latestPosts)
           ? (p.latestPosts as Record<string, unknown>[])
           : [];
-        igImageUrls = posts
+        instagramImages = posts
           .filter(
             (po) =>
               po.type !== "Video" &&
@@ -397,7 +565,7 @@ Deno.serve(async (req) => {
           handle: igHandle,
           ok: true,
           posts: posts.length,
-          images: igImageUrls.length,
+          images: instagramImages.length,
         };
       } else {
         sources.apify_instagram = { handle: igHandle, ok: false };
@@ -405,33 +573,30 @@ Deno.serve(async (req) => {
     })(),
     // Apify → Facebook (followers + rating).
     (async () => {
-      if (!socialLayer || !APIFY_KEY || !resolvedFacebook) return;
+      if (!runFacebook) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.facebookPages,
         { startUrls: [{ url: resolvedFacebook }] },
-        APIFY_KEY,
+        APIFY_KEY!,
       );
       const p = items?.[0];
       if (p) {
-        const followers = numOf(p.followers) ?? numOf(p.likes);
+        fbFollowers = numOf(p.followers) ?? numOf(p.likes);
         const rating = numOf(p.rating) ?? numOf(p.overallStarRating);
-        if (followers != null) update.facebook_followers = followers;
-        if (rating != null && rating >= 0 && rating <= 5) {
-          update.facebook_rating = rating;
-        }
+        if (rating != null && rating >= 0 && rating <= 5) fbRating = rating;
         sources.apify_facebook = { ok: true };
       } else {
         sources.apify_facebook = { ok: false };
       }
     })(),
-    // Firecrawl → website markdown (menu grounding).
+    // Firecrawl → website markdown (menu grounding) + website IMAGES.
     (async () => {
-      if (!socialLayer || !FIRECRAWL_KEY || !resolvedWebsite) return;
+      if (!runWebsite) return;
       try {
         const r = await fetch(FIRECRAWL_URL, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${FIRECRAWL_KEY}`,
+            Authorization: `Bearer ${FIRECRAWL_KEY!}`,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -441,11 +606,19 @@ Deno.serve(async (req) => {
           }),
         });
         if (r.ok) {
-          const data = (await r.json()) as { data?: { markdown?: string } };
+          const data = (await r.json()) as {
+            data?: { markdown?: string; metadata?: { ogImage?: string } };
+          };
           siteMarkdown = (data.data?.markdown ?? "").slice(0, 6000);
-          sources.firecrawl = { ok: !!siteMarkdown };
+          websiteImages = extractWebsiteImages(
+            data.data?.markdown ?? "",
+            data.data?.metadata?.ogImage,
+            resolvedWebsite!,
+            saveWebsiteImages,
+          );
+          sources.firecrawl = { ok: !!siteMarkdown, images: websiteImages.length };
         } else {
-          sources.firecrawl = { ok: false };
+          sources.firecrawl = { ok: false, status: r.status };
         }
       } catch {
         sources.firecrawl = { ok: false };
@@ -453,32 +626,99 @@ Deno.serve(async (req) => {
     })(),
   ]);
 
-  // ── Merge Instagram post images into the venue photo set ─────────────────
-  // business-create-unit already saved Google/website photos. Append the
-  // Instagram images (dedup, ceiling 50) so the gallery sources from IG too.
-  // (Vision re-ranking across the merged set is a later phase.)
-  if (igImageUrls.length > 0) {
-    const existing = Array.isArray(row.photos) ? (row.photos as string[]) : [];
-    const merged: string[] = [];
-    const seen = new Set<string>();
-    for (const u of [...existing, ...igImageUrls]) {
-      if (typeof u === "string" && u && !seen.has(u)) {
-        merged.push(u);
-        seen.add(u);
-        if (merged.length >= 50) break;
+  // Persist the numeric source facts.
+  if (reviews.length > 0) {
+    update.google_reviews = reviews;
+    if (reviewCount != null) update.google_review_count = reviewCount;
+  }
+  if (igFollowers != null) update.instagram_followers_count = igFollowers;
+  if (fbFollowers != null) update.facebook_followers = fbFollowers;
+  if (fbRating != null) update.facebook_rating = fbRating;
+
+  // ── Image funnel: SAVE (pre-select) ──────────────────────────────────────
+  // Each source contributes its already-capped bucket. business-create-unit
+  // may have seeded Places photos into row.photos — fold those into the Google
+  // bucket so we never lose them. Merge all, dedup, hard-cap at PHOTO_CEILING.
+  const existingPhotos = Array.isArray(row.photos) ? (row.photos as string[]) : [];
+  // Google bucket = fresh compass photos first, then any Places photos the
+  // create step already seeded, deduped and capped at the Google save cap.
+  const googleBucket = dedup([...googleImages, ...existingPhotos]).slice(
+    0,
+    saveGoogleImages,
+  );
+  const saved: Img[] = [];
+  const savedSeen = new Set<string>();
+  const pushImg = (url: string, source: Img["source"]) => {
+    if (!url || savedSeen.has(url) || saved.length >= PHOTO_CEILING) return;
+    savedSeen.add(url);
+    saved.push({ url, source });
+  };
+  for (const u of googleBucket) pushImg(u, "google");
+  for (const u of websiteImages) pushImg(u, "website");
+  for (const u of instagramImages) pushImg(u, "instagram");
+
+  // ── Image funnel: ANALYZE (vision) → SORT (text) ─────────────────────────
+  // Take the per-source analyze caps off the top of each bucket, have the
+  // vision model DESCRIBE each (image_analysis_prompt), then have a text model
+  // RANK those descriptions (image_sorting_prompt). Reorder the saved set so
+  // the best cover leads; un-analyzed images keep their original order behind.
+  let finalPhotos = saved.map((s) => s.url);
+  let funnelDiag: Record<string, unknown> = {
+    saved: saved.length,
+    by_source: {
+      google: saved.filter((s) => s.source === "google").length,
+      website: saved.filter((s) => s.source === "website").length,
+      instagram: saved.filter((s) => s.source === "instagram").length,
+    },
+    vision: false,
+  };
+  if (runVision && saved.length > 1) {
+    const caps: Record<Img["source"], number> = {
+      google: analyzeGoogleImages,
+      website: analyzeWebsiteImages,
+      instagram: analyzeInstagramImages,
+    };
+    const used: Record<Img["source"], number> = { google: 0, website: 0, instagram: 0 };
+    const toAnalyze: Img[] = [];
+    for (const img of saved) {
+      if (used[img.source] < caps[img.source]) {
+        toAnalyze.push(img);
+        used[img.source] += 1;
       }
     }
-    update.photos = merged;
-    sources.photos = {
-      existing: existing.length,
-      instagram_added: merged.length - existing.length,
-      total: merged.length,
-    };
+    if (toAnalyze.length > 0) {
+      const descriptions = await visionDescribe(
+        OPENAI_KEY!,
+        toAnalyze.map((i) => i.url),
+        imageAnalysisPrompt,
+      );
+      let order: number[] | null = null;
+      if (descriptions) {
+        order = await textSortImages(OPENAI_KEY!, descriptions, imageSortingPrompt);
+      }
+      if (order && order.length > 0) {
+        const ranked = order
+          .filter((i) => i >= 0 && i < toAnalyze.length)
+          .map((i) => toAnalyze[i].url);
+        const analyzedSet = new Set(toAnalyze.map((i) => i.url));
+        const rest = saved.map((s) => s.url).filter((u) => !analyzedSet.has(u));
+        finalPhotos = dedup([...ranked, ...rest]).slice(0, PHOTO_CEILING);
+        funnelDiag = {
+          ...funnelDiag,
+          vision: true,
+          analyzed: toAnalyze.length,
+          described: !!descriptions,
+          sorted: true,
+        };
+      } else {
+        funnelDiag = { ...funnelDiag, vision: true, analyzed: toAnalyze.length, sorted: false };
+      }
+    }
   }
+  if (finalPhotos.length > 0) update.photos = finalPhotos;
+  sources.image_funnel = funnelDiag;
 
   // ── OpenAI: grounded synthesis (Research Backbone) ───────────────────────
-  // Reads ONLY the gathered source material — no web — so it can't drift from
-  // what we actually collected. Model picked by the admin 'synthesis quality'.
   if (!OPENAI_KEY) {
     return json({ ok: false, error: "OPENAI_KEY not configured" }, 500);
   }
@@ -512,39 +752,43 @@ Deno.serve(async (req) => {
     " Never invent ratings, reviewer quotes, prices, or a chef's name.";
 
   let parsed: ProfileResult | null = null;
-  try {
-    const r = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: synthesisModel,
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: systemContent },
-          { role: "user", content: userPrompt },
-        ],
-        response_format: { type: "json_object" },
-      }),
-    });
-    if (r.ok) {
-      const data = (await r.json()) as {
-        choices?: { message?: { content?: string } }[];
-      };
-      parsed = safeParseProfile(data.choices?.[0]?.message?.content ?? "");
-      sources.synthesis = { provider: "openai", model: synthesisModel, ok: !!parsed };
-    } else {
-      sources.synthesis = {
-        provider: "openai",
-        model: synthesisModel,
-        ok: false,
-        status: r.status,
-      };
+  if (runSynthesis) {
+    try {
+      const r = await fetch(OPENAI_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: synthesisModel,
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: systemContent },
+            { role: "user", content: userPrompt },
+          ],
+          response_format: { type: "json_object" },
+        }),
+      });
+      if (r.ok) {
+        const data = (await r.json()) as {
+          choices?: { message?: { content?: string } }[];
+        };
+        parsed = safeParseProfile(data.choices?.[0]?.message?.content ?? "");
+        sources.synthesis = { provider: "openai", model: synthesisModel, ok: !!parsed };
+      } else {
+        sources.synthesis = {
+          provider: "openai",
+          model: synthesisModel,
+          ok: false,
+          status: r.status,
+        };
+      }
+    } catch {
+      sources.synthesis = { provider: "openai", model: synthesisModel, ok: false };
     }
-  } catch {
-    sources.synthesis = { provider: "openai", model: synthesisModel, ok: false };
+  } else {
+    sources.synthesis = { ok: false, reason: "cost_cap" };
   }
 
   if (parsed) {
@@ -568,7 +812,48 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ── Cost accounting ──────────────────────────────────────────────────────
+  sources.cost = {
+    cap_usd: costCapUsd,
+    estimated_usd: Math.round(plannedUsd * 1000) / 1000,
+    breakdown: cost,
+  };
   update.enrichment_sources = sources;
+
+  // ── Snapshot save (Phase 4) ──────────────────────────────────────────────
+  // Append-only: every run writes a fresh snapshot of the gathered material so
+  // the next pre-read can skip the gaps. Best-effort — never fails the enrich.
+  if (saveSnapshots) {
+    const gathered: Gathered = {
+      reviews,
+      reviewCount,
+      googleReviewsText,
+      igBio,
+      igFollowers,
+      fbFollowers,
+      fbRating,
+      siteMarkdown,
+      serperText,
+      googleImages,
+      websiteImages,
+      instagramImages,
+      discovery: discovered ?? {
+        instagram_url: resolvedInstagram,
+        facebook_url: resolvedFacebook,
+        website_url: resolvedWebsite,
+      },
+    };
+    const ok = await saveSnapshot(admin, venueId, {
+      version: 1,
+      venue_id: venueId,
+      name: row.name,
+      ts: new Date().toISOString(),
+      gathered,
+      sources,
+      fields: Object.keys(update),
+    });
+    sources.snapshot_write = { ok };
+  }
 
   const { error: updErr } = await admin
     .from("venues")
@@ -589,9 +874,198 @@ Deno.serve(async (req) => {
   });
 });
 
-// Resolve a venue's canonical channel URLs from search. Perplexity is far
-// better than raw SERP at "which Facebook page is this venue's" — but it's
-// an LLM, so every URL it returns is host-validated before we trust it.
+// ── Image funnel helpers ────────────────────────────────────────────────────
+
+// Pull image URLs out of scraped website content: markdown image syntax
+// ![alt](url) + the og:image. Resolved against the site origin and capped.
+function extractWebsiteImages(
+  markdown: string,
+  ogImage: string | undefined,
+  baseUrl: string,
+  cap: number,
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (u: string | undefined) => {
+    if (!u || out.length >= cap) return;
+    let abs = u.trim();
+    try {
+      abs = new URL(abs, baseUrl).toString();
+    } catch {
+      return;
+    }
+    if (!/^https?:\/\//i.test(abs)) return;
+    if (!/\.(jpe?g|png|webp|avif)(\?|$)/i.test(abs)) return;
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    out.push(abs);
+  };
+  add(ogImage);
+  const re = /!\[[^\]]*\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(markdown)) && out.length < cap) add(m[1]);
+  return out;
+}
+
+// Vision pass: describe each image with the admin analysis prompt. One call,
+// all images in order, returns descriptions aligned to the input order.
+async function visionDescribe(
+  openaiKey: string,
+  urls: string[],
+  prompt: string,
+): Promise<string[] | null> {
+  const content: Record<string, unknown>[] = [
+    {
+      type: "text",
+      text:
+        prompt +
+        `\n\nYou are given ${urls.length} venue photos, in order. Return a SINGLE ` +
+        `JSON object {"descriptions": [string, ...]} with exactly one short ` +
+        `description per image, in the same order. No prose, no fences.`,
+    },
+  ];
+  for (const url of urls) {
+    content.push({ type: "image_url", image_url: { url, detail: "low" } });
+  }
+  try {
+    const r = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        temperature: 0,
+        messages: [{ role: "user", content }],
+        response_format: { type: "json_object" },
+        max_tokens: 1500,
+      }),
+    });
+    if (!r.ok) return null;
+    const data = (await r.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const obj = safeParseJson(data.choices?.[0]?.message?.content ?? "");
+    const arr = (obj as { descriptions?: unknown })?.descriptions;
+    if (!Array.isArray(arr)) return null;
+    // Align to input length: pad/truncate so indices stay meaningful.
+    return urls.map((_, i) => (typeof arr[i] === "string" ? (arr[i] as string) : ""));
+  } catch {
+    return null;
+  }
+}
+
+// Sort pass: a TEXT model ranks the (already-described) images best→worst by
+// the admin sorting prompt. Returns indices into the descriptions array.
+async function textSortImages(
+  openaiKey: string,
+  descriptions: string[],
+  prompt: string,
+): Promise<number[] | null> {
+  const list = descriptions.map((d, i) => `${i}: ${d || "(no description)"}`).join("\n");
+  const user =
+    prompt +
+    `\n\nImages (index: description):\n${list}\n\nReturn a SINGLE JSON object ` +
+    `{"order": [indices best-to-worst]}. Include EVERY index exactly once; do ` +
+    `not drop any. No prose, no fences.`;
+  try {
+    const r = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        temperature: 0,
+        messages: [{ role: "user", content: user }],
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!r.ok) return null;
+    const data = (await r.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const obj = safeParseJson(data.choices?.[0]?.message?.content ?? "");
+    const raw = (obj as { order?: unknown })?.order;
+    if (!Array.isArray(raw)) return null;
+    const order: number[] = [];
+    const seen = new Set<number>();
+    for (const v of raw) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (Number.isInteger(n) && n >= 0 && n < descriptions.length && !seen.has(n)) {
+        order.push(n);
+        seen.add(n);
+      }
+    }
+    // Append any indices the model dropped so we never lose an image.
+    for (let i = 0; i < descriptions.length; i++) {
+      if (!seen.has(i)) order.push(i);
+    }
+    return order;
+  } catch {
+    return null;
+  }
+}
+
+// ── Snapshot helpers (Supabase Storage; append-only) ────────────────────────
+
+async function loadLatestSnapshot(
+  admin: SupabaseClient,
+  venueId: string,
+): Promise<{ ageDays: number; gathered: Gathered } | null> {
+  try {
+    const { data: list, error } = await admin.storage
+      .from(SNAPSHOT_BUCKET)
+      .list(venueId, { limit: 100, sortBy: { column: "name", order: "desc" } });
+    if (error || !list || list.length === 0) return null;
+    const latest = list.find((o) => o.name.endsWith(".json"));
+    if (!latest) return null;
+    const { data: blob, error: dlErr } = await admin.storage
+      .from(SNAPSHOT_BUCKET)
+      .download(`${venueId}/${latest.name}`);
+    if (dlErr || !blob) return null;
+    const parsed = JSON.parse(await blob.text()) as {
+      ts?: string;
+      gathered?: Gathered;
+    };
+    if (!parsed.gathered) return null;
+    const ts = parsed.ts ? Date.parse(parsed.ts) : NaN;
+    const ageDays = Number.isFinite(ts)
+      ? (Date.now() - ts) / 86_400_000
+      : Number.POSITIVE_INFINITY;
+    return { ageDays, gathered: parsed.gathered };
+  } catch {
+    return null;
+  }
+}
+
+async function saveSnapshot(
+  admin: SupabaseClient,
+  venueId: string,
+  payload: unknown,
+): Promise<boolean> {
+  try {
+    // Idempotent ensure — createBucket errors when it already exists; ignore.
+    await admin.storage
+      .createBucket(SNAPSHOT_BUCKET, { public: false })
+      .catch(() => {});
+    const name = `${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    const { error } = await admin.storage
+      .from(SNAPSHOT_BUCKET)
+      .upload(`${venueId}/${name}`, JSON.stringify(payload, null, 2), {
+        contentType: "application/json",
+        upsert: false,
+      });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// ── Discovery + parsing helpers ─────────────────────────────────────────────
+
 async function discoverChannels(
   key: string,
   name: string,
@@ -640,7 +1114,7 @@ async function discoverChannels(
     const data = (await r.json()) as {
       choices?: { message?: { content?: string } }[];
     };
-    const parsed = safeParseProfile(data.choices?.[0]?.message?.content ?? "") as
+    const parsed = safeParseJson(data.choices?.[0]?.message?.content ?? "") as
       | { instagram_url?: unknown; facebook_url?: unknown; website_url?: unknown }
       | null;
     if (!parsed) return null;
@@ -654,10 +1128,6 @@ async function discoverChannels(
   }
 }
 
-// Accept a string only if it parses as an http(s) URL. When `allowed` is set
-// the host must match one of those domains (or a subdomain) AND carry a path
-// beyond "/" — guards against an LLM handing back a bare "facebook.com" or a
-// hallucinated host. `allowed = null` accepts any web host (used for website).
 function validHost(v: unknown, allowed: string[] | null): string | null {
   if (typeof v !== "string" || !v) return null;
   let u: URL;
@@ -676,6 +1146,18 @@ function validHost(v: unknown, allowed: string[] | null): string | null {
   return u.toString();
 }
 
+function dedup(arr: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const u of arr) {
+    if (typeof u === "string" && u && !seen.has(u)) {
+      seen.add(u);
+      out.push(u);
+    }
+  }
+  return out;
+}
+
 function numOf(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string") {
@@ -686,6 +1168,10 @@ function numOf(v: unknown): number | null {
 }
 
 function safeParseProfile(content: string): ProfileResult | null {
+  return safeParseJson(content) as ProfileResult | null;
+}
+
+function safeParseJson(content: string): unknown | null {
   if (!content) return null;
   let s = content.trim();
   s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
@@ -693,7 +1179,7 @@ function safeParseProfile(content: string): ProfileResult | null {
   const end = s.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) return null;
   try {
-    return JSON.parse(s.slice(start, end + 1)) as ProfileResult;
+    return JSON.parse(s.slice(start, end + 1));
   } catch {
     return null;
   }
