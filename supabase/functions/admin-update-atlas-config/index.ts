@@ -29,12 +29,40 @@ type Body = {
   snapshotOnBusinessEdit?: boolean;
   googleImages?: number;
   instagramPosts?: number;
+  // Sourcing
+  sourceTierCeiling?: number;
+  sourceOverrides?: Record<string, unknown>;
+  serpOnlyWhenThin?: boolean;
+  // Data depth
+  googleReviews?: number;
+  websiteCrawlMaxPages?: number;
+  reviewsPerSite?: number;
+  // Analysis
+  imageVisionEnabled?: boolean;
+  maxImagesAnalyzed?: number;
+  perSourceAiSummary?: boolean;
+  synthesisQuality?: string;
+  perRunCostCapUsd?: number;
 };
+
+const QUALITY_VALUES = new Set(["economy", "standard", "high"]);
 
 function intInRange(v: unknown, min: number, max: number): number | null {
   if (typeof v !== "number" || !Number.isInteger(v)) return null;
   if (v < min || v > max) return null;
   return v;
+}
+
+// A clean { string: boolean } map only — guards the jsonb override column
+// against arbitrary nested payloads.
+function boolMap(v: unknown): Record<string, boolean> | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const out: Record<string, boolean> = {};
+  for (const [k, val] of Object.entries(v)) {
+    if (typeof val !== "boolean") return null;
+    out[k] = val;
+  }
+  return out;
 }
 
 Deno.serve(async (req) => {
@@ -101,6 +129,114 @@ Deno.serve(async (req) => {
     patch.atlas_research_instagram_posts = n;
   }
 
+  // ── Sourcing ──────────────────────────────────────────────────────────
+  if (body.sourceTierCeiling !== undefined) {
+    const n = intInRange(body.sourceTierCeiling, 1, 5);
+    if (n === null) {
+      return json(
+        { ok: false, error: "sourceTierCeiling must be an integer 1-5" },
+        400,
+      );
+    }
+    patch.atlas_source_tier_ceiling = n;
+  }
+
+  if (body.sourceOverrides !== undefined) {
+    const map = boolMap(body.sourceOverrides);
+    if (map === null) {
+      return json(
+        { ok: false, error: "sourceOverrides must be a { string: boolean } map" },
+        400,
+      );
+    }
+    patch.atlas_source_overrides = map;
+  }
+
+  if (body.serpOnlyWhenThin !== undefined) {
+    if (typeof body.serpOnlyWhenThin !== "boolean") {
+      return json({ ok: false, error: "serpOnlyWhenThin must be a boolean" }, 400);
+    }
+    patch.atlas_serp_only_when_thin = body.serpOnlyWhenThin;
+  }
+
+  // ── Data depth ────────────────────────────────────────────────────────
+  if (body.googleReviews !== undefined) {
+    const n = intInRange(body.googleReviews, 0, 5);
+    if (n === null) {
+      return json({ ok: false, error: "googleReviews must be an integer 0-5" }, 400);
+    }
+    patch.atlas_google_reviews = n;
+  }
+
+  if (body.websiteCrawlMaxPages !== undefined) {
+    const n = intInRange(body.websiteCrawlMaxPages, 1, 20);
+    if (n === null) {
+      return json(
+        { ok: false, error: "websiteCrawlMaxPages must be an integer 1-20" },
+        400,
+      );
+    }
+    patch.atlas_website_crawl_max_pages = n;
+  }
+
+  if (body.reviewsPerSite !== undefined) {
+    const n = intInRange(body.reviewsPerSite, 0, 30);
+    if (n === null) {
+      return json({ ok: false, error: "reviewsPerSite must be an integer 0-30" }, 400);
+    }
+    patch.atlas_reviews_per_site = n;
+  }
+
+  // ── Analysis ──────────────────────────────────────────────────────────
+  if (body.imageVisionEnabled !== undefined) {
+    if (typeof body.imageVisionEnabled !== "boolean") {
+      return json({ ok: false, error: "imageVisionEnabled must be a boolean" }, 400);
+    }
+    patch.atlas_image_vision_enabled = body.imageVisionEnabled;
+  }
+
+  if (body.maxImagesAnalyzed !== undefined) {
+    const n = intInRange(body.maxImagesAnalyzed, 0, 100);
+    if (n === null) {
+      return json(
+        { ok: false, error: "maxImagesAnalyzed must be an integer 0-100" },
+        400,
+      );
+    }
+    patch.atlas_max_images_analyzed = n;
+  }
+
+  if (body.perSourceAiSummary !== undefined) {
+    if (typeof body.perSourceAiSummary !== "boolean") {
+      return json({ ok: false, error: "perSourceAiSummary must be a boolean" }, 400);
+    }
+    patch.atlas_per_source_ai_summary = body.perSourceAiSummary;
+  }
+
+  if (body.synthesisQuality !== undefined) {
+    if (
+      typeof body.synthesisQuality !== "string" ||
+      !QUALITY_VALUES.has(body.synthesisQuality)
+    ) {
+      return json(
+        { ok: false, error: "synthesisQuality must be economy, standard, or high" },
+        400,
+      );
+    }
+    patch.atlas_synthesis_quality = body.synthesisQuality;
+  }
+
+  if (body.perRunCostCapUsd !== undefined) {
+    if (typeof body.perRunCostCapUsd !== "number" || body.perRunCostCapUsd < 0) {
+      return json(
+        { ok: false, error: "perRunCostCapUsd must be a number >= 0" },
+        400,
+      );
+    }
+    // Cap precision to 2 decimals to match numeric(8,2).
+    patch.atlas_per_run_cost_cap_usd = Math.round(body.perRunCostCapUsd * 100) / 100;
+  }
+
   if (Object.keys(patch).length === 0) {
     return json({ ok: false, error: "Nothing to update" }, 400);
   }
@@ -111,7 +247,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_serp_only_when_thin, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_reviews_per_site, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_per_source_ai_summary, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -127,6 +263,17 @@ Deno.serve(async (req) => {
     atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
     atlasResearchGoogleImages: data.atlas_research_google_images,
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
+    atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
+    atlasSourceOverrides: data.atlas_source_overrides,
+    atlasSerpOnlyWhenThin: data.atlas_serp_only_when_thin,
+    atlasGoogleReviews: data.atlas_google_reviews,
+    atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
+    atlasReviewsPerSite: data.atlas_reviews_per_site,
+    atlasImageVisionEnabled: data.atlas_image_vision_enabled,
+    atlasMaxImagesAnalyzed: data.atlas_max_images_analyzed,
+    atlasPerSourceAiSummary: data.atlas_per_source_ai_summary,
+    atlasSynthesisQuality: data.atlas_synthesis_quality,
+    atlasPerRunCostCapUsd: data.atlas_per_run_cost_cap_usd,
     updatedAt: data.updated_at,
   });
 });
