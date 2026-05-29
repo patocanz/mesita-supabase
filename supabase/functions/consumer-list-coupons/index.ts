@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
   let q = admin
     .from("coupons")
     .select(
-      "id, status, issued_at, redeemed_at, cancelled_at, expires_at, welcome_bronze_rate, welcome_silver_rate, welcome_gold_rate, welcome_diamond_rate, bronze_rate, silver_rate, gold_rate, diamond_rate, cap_cents, currency, venue:venues(id, slug, name, category, photos, address)",
+      "id, status, issued_at, redeemed_at, cancelled_at, expires_at, welcome_free_rate, welcome_premium_rate, free_rate, premium_rate, cap_cents, currency, venue:venues(id, slug, name, category, photos, address)",
     )
     .eq("consumer_id", consumerId)
     .order("issued_at", { ascending: false })

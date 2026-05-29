@@ -70,7 +70,7 @@ Deno.serve(async (req) => {
     const { data: coupon } = await admin
       .from("coupons")
       .select(
-        "id, venue_id, status, issued_at, welcome_bronze_rate, welcome_silver_rate, welcome_gold_rate, welcome_diamond_rate, bronze_rate, silver_rate, gold_rate, diamond_rate, cap_cents, currency, expires_at",
+        "id, venue_id, status, issued_at, welcome_free_rate, welcome_premium_rate, free_rate, premium_rate, cap_cents, currency, expires_at",
       )
       .eq("consumer_id", consumerId)
       .eq("venue_id", body.venue_id)

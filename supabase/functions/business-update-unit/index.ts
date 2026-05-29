@@ -50,17 +50,13 @@ type UpdateBody = {
   pitch?: string | null;
   story?: string | null;
   cashback_percent?: number | null;
-  // Eight per-tier promo rates (migration 0027). Welcome variants fire on a
+  // Four per-tier promo rates (migration 0032). Welcome variants fire on a
   // guest's first visit at the venue; the unprefixed variants apply on every
   // visit afterwards. DB constraint enforces the legal set {10, 20, 50, 70}.
-  welcome_bronze_rate?: number | null;
-  welcome_silver_rate?: number | null;
-  welcome_gold_rate?: number | null;
-  welcome_diamond_rate?: number | null;
-  bronze_rate?: number | null;
-  silver_rate?: number | null;
-  gold_rate?: number | null;
-  diamond_rate?: number | null;
+  welcome_free_rate?: number | null;
+  welcome_premium_rate?: number | null;
+  free_rate?: number | null;
+  premium_rate?: number | null;
   photos?: string[];
   // External + social channels
   website_url?: string | null;
@@ -297,18 +293,14 @@ Deno.serve(async (req) => {
       body.cashback_percent == null ? null : clampInt(body.cashback_percent, 0, 100);
   }
 
-  // Eight per-tier promo rates. Each is nullable (null clears the offer) or
+  // Four per-tier promo rates. Each is nullable (null clears the offer) or
   // one of {10, 20, 50, 70}. The DB has a matching CHECK constraint so a
   // mis-shaped client can't slip through; this is the friendly 400 layer.
   const PROMO_RATE_FIELDS = [
-    "welcome_bronze_rate",
-    "welcome_silver_rate",
-    "welcome_gold_rate",
-    "welcome_diamond_rate",
-    "bronze_rate",
-    "silver_rate",
-    "gold_rate",
-    "diamond_rate",
+    "welcome_free_rate",
+    "welcome_premium_rate",
+    "free_rate",
+    "premium_rate",
   ] as const;
   const LEGAL_PROMO_RATES = new Set([10, 20, 50, 70]);
   for (const field of PROMO_RATE_FIELDS) {
