@@ -57,6 +57,9 @@ type UpdateBody = {
   welcome_premium_rate?: number | null;
   free_rate?: number | null;
   premium_rate?: number | null;
+  // Venue-level monthly promo spend cap (migration 0038), in the venue's
+  // currency. One of 200, 500, 1000, 2000 or null (no cap).
+  monthly_promo_cap?: number | null;
   photos?: string[];
   // External + social channels
   website_url?: string | null;
@@ -318,6 +321,24 @@ Deno.serve(async (req) => {
       );
     }
     update[field] = v;
+  }
+
+  // Monthly promo spend cap. Nullable (null clears the ceiling) or one of
+  // {200, 500, 1000, 2000}. DB CHECK mirrors this; this is the friendly 400.
+  if ("monthly_promo_cap" in body) {
+    const raw = body.monthly_promo_cap;
+    if (raw == null) {
+      update.monthly_promo_cap = null;
+    } else {
+      const v = Number(raw);
+      if (![200, 500, 1000, 2000].includes(v)) {
+        return json(
+          { ok: false, error: "monthly_promo_cap must be null or one of 200, 500, 1000, 2000" },
+          400,
+        );
+      }
+      update.monthly_promo_cap = v;
+    }
   }
   if ("photos" in body) {
     if (!Array.isArray(body.photos)) {

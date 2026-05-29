@@ -51,6 +51,9 @@ const COLUMNS: readonly string[] = [
   "welcome_premium_rate",
   "free_rate",
   "premium_rate",
+  // Venue-level monthly promo spend ceiling (migration 0038), in the venue's
+  // currency. One of 200, 500, 1000, 2000 or null (no cap).
+  "monthly_promo_cap",
   "photos",
   "menu_pdf_url",
   // Optional display name for menu_pdf_url, e.g. "Dinner menu" /
