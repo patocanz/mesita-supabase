@@ -94,6 +94,15 @@ const PROFILE_SCHEMA = {
   },
 } as const;
 
+const CHANNELS_SCHEMA = {
+  type: "object",
+  properties: {
+    instagram_url: { type: ["string", "null"] },
+    facebook_url: { type: ["string", "null"] },
+    website_url: { type: ["string", "null"] },
+  },
+} as const;
+
 type ProfileResult = {
   zone?: string | null;
   city?: string | null;
@@ -140,23 +149,86 @@ Deno.serve(async (req) => {
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
   const SERPER_KEY = Deno.env.get("SERPER_KEY");
 
+  const sources: Record<string, unknown> = {};
+  const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
+
+  // ── Channel discovery ────────────────────────────────────────────────────
+  // The columns may already carry socials harvested from the venue's website
+  // at create time (business-create-unit walks the site's outbound links).
+  // But that only works when the site links its own socials — many don't. So
+  // for any channel still missing, ask Perplexity to resolve the canonical
+  // URL from search, then host-validate it before trusting it: an LLM must
+  // never hand us a fabricated handle we'd waste an Apify run scraping.
+  let resolvedInstagram =
+    typeof row.instagram_url === "string" && row.instagram_url
+      ? row.instagram_url
+      : null;
+  let resolvedFacebook =
+    typeof row.facebook_url === "string" && row.facebook_url
+      ? row.facebook_url
+      : null;
+  let resolvedWebsite =
+    typeof row.website_url === "string" && row.website_url
+      ? row.website_url
+      : null;
+
+  if (
+    PERPLEXITY_KEY &&
+    (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite)
+  ) {
+    const discoveryLocation = [row.address, row.city].filter(Boolean).join(", ");
+    const found = await discoverChannels(
+      PERPLEXITY_KEY,
+      row.name as string,
+      discoveryLocation,
+      (row.category as string | null) ?? null,
+    );
+    if (found) {
+      if (!resolvedInstagram && found.instagram_url) {
+        resolvedInstagram = found.instagram_url;
+      }
+      if (!resolvedFacebook && found.facebook_url) {
+        resolvedFacebook = found.facebook_url;
+      }
+      if (!resolvedWebsite && found.website_url) {
+        resolvedWebsite = found.website_url;
+      }
+      sources.discovery = {
+        ok: true,
+        instagram: !!found.instagram_url,
+        facebook: !!found.facebook_url,
+        website: !!found.website_url,
+      };
+    } else {
+      sources.discovery = { ok: false };
+    }
+  }
+
+  // Persist any newly resolved channel so future reads + re-runs have them.
+  if (resolvedInstagram && resolvedInstagram !== row.instagram_url) {
+    update.instagram_url = resolvedInstagram;
+  }
+  if (resolvedFacebook && resolvedFacebook !== row.facebook_url) {
+    update.facebook_url = resolvedFacebook;
+  }
+  if (resolvedWebsite && resolvedWebsite !== row.website_url) {
+    update.website_url = resolvedWebsite;
+  }
+
   // Only reach for Serper when Google Places came back thin — no rating, no
   // editorial summary, or no website. Otherwise the Google spine already
   // covers the SERP-level facts and we skip the extra call.
   const googleThin =
     row.google_stars_overall == null ||
     !row.editorial_summary ||
-    !row.website_url;
+    !resolvedWebsite;
 
-  const sources: Record<string, unknown> = {};
-  const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
-
-  // The three external lookups are independent — run them concurrently so a
-  // slow actor doesn't stack latency and push the agent past the EF wall.
+  // The external lookups are independent — run them concurrently so a slow
+  // actor doesn't stack latency and push the agent past the EF wall.
   let igBio = "";
   let siteMarkdown = "";
   let serperText = "";
-  const igHandle = instagramHandleFromUrl(row.instagram_url as string | null);
+  const igHandle = instagramHandleFromUrl(resolvedInstagram);
 
   await Promise.all([
     // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
@@ -218,12 +290,10 @@ Deno.serve(async (req) => {
     })(),
     // Apify → Facebook (followers + rating).
     (async () => {
-      if (!APIFY_KEY || typeof row.facebook_url !== "string" || !row.facebook_url) {
-        return;
-      }
+      if (!APIFY_KEY || !resolvedFacebook) return;
       const items = await runApifyActor<Record<string, unknown>>(
         APIFY_ACTORS.facebookPages,
-        { startUrls: [{ url: row.facebook_url }] },
+        { startUrls: [{ url: resolvedFacebook }] },
         APIFY_KEY,
       );
       const p = items?.[0];
@@ -241,9 +311,7 @@ Deno.serve(async (req) => {
     })(),
     // Firecrawl → website markdown (menu grounding).
     (async () => {
-      if (!FIRECRAWL_KEY || typeof row.website_url !== "string" || !row.website_url) {
-        return;
-      }
+      if (!FIRECRAWL_KEY || !resolvedWebsite) return;
       try {
         const r = await fetch(FIRECRAWL_URL, {
           method: "POST",
@@ -252,7 +320,7 @@ Deno.serve(async (req) => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            url: row.website_url,
+            url: resolvedWebsite,
             formats: ["markdown"],
             onlyMainContent: true,
           }),
@@ -370,6 +438,93 @@ Deno.serve(async (req) => {
     caller: callerRes.callerName,
   });
 });
+
+// Resolve a venue's canonical channel URLs from search. Perplexity is far
+// better than raw SERP at "which Facebook page is this venue's" — but it's
+// an LLM, so every URL it returns is host-validated before we trust it.
+async function discoverChannels(
+  key: string,
+  name: string,
+  locationLine: string,
+  category: string | null,
+): Promise<
+  | {
+      instagram_url: string | null;
+      facebook_url: string | null;
+      website_url: string | null;
+    }
+  | null
+> {
+  const prompt =
+    `Find the official online presence of the venue "${name}"` +
+    (locationLine ? ` located at ${locationLine}` : "") +
+    (category ? ` (category: ${category})` : "") +
+    `. Return strict JSON with the canonical URLs of its official Instagram ` +
+    `profile, Facebook page, and website. Only return a URL you can verify ` +
+    `from search results; use null when you are not confident. Never invent ` +
+    `or guess a URL.`;
+  try {
+    const r = await fetch(PERPLEXITY_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: PERPLEXITY_MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You resolve a venue's official channel URLs from search. Output only valid JSON matching the schema. Prefer null over guessing. Never fabricate URLs.",
+          },
+          { role: "user", content: prompt },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: { schema: CHANNELS_SCHEMA },
+        },
+      }),
+    });
+    if (!r.ok) return null;
+    const data = (await r.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const parsed = safeParseProfile(data.choices?.[0]?.message?.content ?? "") as
+      | { instagram_url?: unknown; facebook_url?: unknown; website_url?: unknown }
+      | null;
+    if (!parsed) return null;
+    return {
+      instagram_url: validHost(parsed.instagram_url, ["instagram.com"]),
+      facebook_url: validHost(parsed.facebook_url, ["facebook.com", "fb.com"]),
+      website_url: validHost(parsed.website_url, null),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Accept a string only if it parses as an http(s) URL. When `allowed` is set
+// the host must match one of those domains (or a subdomain) AND carry a path
+// beyond "/" — guards against an LLM handing back a bare "facebook.com" or a
+// hallucinated host. `allowed = null` accepts any web host (used for website).
+function validHost(v: unknown, allowed: string[] | null): string | null {
+  if (typeof v !== "string" || !v) return null;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  const h = u.hostname.toLowerCase().replace(/^www\./, "");
+  if (allowed) {
+    const match = allowed.some((a) => h === a || h.endsWith(`.${a}`));
+    if (!match) return null;
+    if (u.pathname === "/" || u.pathname === "") return null;
+  }
+  return u.toString();
+}
 
 function numOf(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
