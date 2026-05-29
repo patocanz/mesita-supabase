@@ -92,9 +92,26 @@ const COLUMNS: readonly string[] = [
   "mesita_stars_food",
   "mesita_stars_service",
   "mesita_stars_ambience",
+  "mesita_stars_value",
   "mesita_review_count",
   "mesita_visitor_count",
   "instagram_followers_count",
+  "facebook_rating",
+  "facebook_followers",
+  // Complete-venue profile (migration 0039). Scalars + JSONB filled by the
+  // one-run enricher; all nullable.
+  "editorial_summary",
+  "zone",
+  "city",
+  "established_year",
+  "executive_chef",
+  "reward_cap_cents",
+  "requires_story",
+  "details",
+  "google_reviews",
+  "menus",
+  "popular_times",
+  "enriched_at",
   // Promos page section toggles. Boolean, business-controlled, persisted
   // so the on/off state survives page reloads.
   "segmentation_basic_enabled",
