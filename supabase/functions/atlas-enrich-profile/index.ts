@@ -71,6 +71,10 @@ const PHOTO_CEILING = 50;
 const SNAPSHOT_BUCKET = "atlas-snapshots";
 const SNAPSHOT_REUSE_DAYS = 14;
 
+// Public bucket where ephemeral source images (Instagram, website) are
+// re-hosted so the gallery survives the source URL expiring / hotlink-blocking.
+const IMAGE_BUCKET = "venue-images";
+
 // Rough per-call cost estimates (USD). Approximate but enough to make the
 // per-run cap meaningful — it's a safety valve, not billing.
 const COST = {
@@ -635,6 +639,24 @@ Deno.serve(async (req) => {
   if (fbFollowers != null) update.facebook_followers = fbFollowers;
   if (fbRating != null) update.facebook_rating = fbRating;
 
+  // ── Re-host ephemeral images (durable gallery) ───────────────────────────
+  // Instagram CDN URLs expire (signed) and some website images hotlink-block;
+  // download + re-upload them to the public venue-images bucket so the gallery
+  // survives. Best-effort per image — a failed mirror keeps the original URL.
+  // Already-mirrored URLs (snapshot reuse) are skipped inside the helper.
+  // Google's lh3 photo URLs are stable, so they're left direct.
+  const mirrorBefore = instagramImages.length + websiteImages.length;
+  if (mirrorBefore > 0) {
+    [instagramImages, websiteImages] = await Promise.all([
+      mirrorImages(admin, envRes.env.url, venueId, instagramImages, "ig"),
+      mirrorImages(admin, envRes.env.url, venueId, websiteImages, "web"),
+    ]);
+    const mirrored = [...instagramImages, ...websiteImages].filter((u) =>
+      u.includes(`/${IMAGE_BUCKET}/`)
+    ).length;
+    sources.image_mirror = { candidates: mirrorBefore, mirrored };
+  }
+
   // ── Image funnel: SAVE (pre-select) ──────────────────────────────────────
   // Each source contributes its already-capped bucket. business-create-unit
   // may have seeded Places photos into row.photos — fold those into the Google
@@ -1062,6 +1084,58 @@ async function saveSnapshot(
   } catch {
     return false;
   }
+}
+
+// Download each image and re-upload to the public venue-images bucket, so the
+// gallery survives the source URL expiring. Best-effort per image: any failure
+// (bad fetch, non-image, too big, upload error) falls back to the original URL.
+// URLs already hosted in our bucket are passed through untouched.
+async function mirrorImages(
+  admin: SupabaseClient,
+  supabaseUrl: string,
+  venueId: string,
+  urls: string[],
+  prefix: string,
+): Promise<string[]> {
+  if (urls.length === 0) return urls;
+  const publicPath = `/storage/v1/object/public/${IMAGE_BUCKET}/`;
+  await admin.storage.createBucket(IMAGE_BUCKET, { public: true }).catch(() => {});
+  return await Promise.all(
+    urls.map(async (url, i) => {
+      if (typeof url !== "string" || !url) return url;
+      if (url.includes(publicPath)) return url; // already mirrored
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 15000);
+        let r: Response;
+        try {
+          r = await fetch(url, { signal: ctrl.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+        if (!r.ok) return url;
+        const ct = r.headers.get("content-type") ?? "image/jpeg";
+        if (!ct.startsWith("image/")) return url;
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        if (bytes.byteLength === 0 || bytes.byteLength > 8_000_000) return url;
+        const ext = ct.includes("png")
+          ? "png"
+          : ct.includes("webp")
+            ? "webp"
+            : ct.includes("avif")
+              ? "avif"
+              : "jpg";
+        const path = `${venueId}/${prefix}-${i}.${ext}`;
+        const { error } = await admin.storage
+          .from(IMAGE_BUCKET)
+          .upload(path, bytes, { contentType: ct, upsert: true });
+        if (error) return url;
+        return `${supabaseUrl}${publicPath}${path}`;
+      } catch {
+        return url;
+      }
+    }),
+  );
 }
 
 // ── Discovery + parsing helpers ─────────────────────────────────────────────
