@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
   const { data, error } = await admin
     .from("app_settings")
     .select(
-      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_research_google_images, atlas_research_instagram_posts, updated_at",
+      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, updated_at",
     )
     .eq("id", 1)
     .maybeSingle();
@@ -60,6 +60,7 @@ Deno.serve(async (req) => {
     autoVerifyVideo: data.auto_verify_video,
     atlasPreReadSnapshots: data.atlas_pre_read_snapshots,
     atlasSaveSnapshots: data.atlas_save_snapshots,
+    atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
     atlasResearchGoogleImages: data.atlas_research_google_images,
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     updatedAt: data.updated_at,

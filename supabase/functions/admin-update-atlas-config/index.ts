@@ -26,6 +26,7 @@ import {
 
 type Body = {
   saveSnapshots?: boolean;
+  snapshotOnBusinessEdit?: boolean;
   googleImages?: number;
   instagramPosts?: number;
 };
@@ -68,6 +69,16 @@ Deno.serve(async (req) => {
     patch.atlas_save_snapshots = body.saveSnapshots;
   }
 
+  if (body.snapshotOnBusinessEdit !== undefined) {
+    if (typeof body.snapshotOnBusinessEdit !== "boolean") {
+      return json(
+        { ok: false, error: "snapshotOnBusinessEdit must be a boolean" },
+        400,
+      );
+    }
+    patch.atlas_snapshot_on_business_edit = body.snapshotOnBusinessEdit;
+  }
+
   if (body.googleImages !== undefined) {
     const n = intInRange(body.googleImages, 0, 20);
     if (n === null) {
@@ -100,7 +111,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_research_google_images, atlas_research_instagram_posts, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, updated_at",
     )
     .single();
   if (error) {
@@ -113,6 +124,7 @@ Deno.serve(async (req) => {
   return json({
     ok: true,
     atlasSaveSnapshots: data.atlas_save_snapshots,
+    atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
     atlasResearchGoogleImages: data.atlas_research_google_images,
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     updatedAt: data.updated_at,
