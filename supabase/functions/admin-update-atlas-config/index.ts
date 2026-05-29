@@ -36,7 +36,11 @@ type Body = {
   websiteCrawlMaxPages?: number;
   // Analysis
   imageVisionEnabled?: boolean;
+  saveGoogleImages?: number;
+  saveWebsiteImages?: number;
+  saveInstagramImages?: number;
   analyzeGoogleImages?: number;
+  analyzeWebsiteImages?: number;
   analyzeInstagramImages?: number;
   imageAnalysisPrompt?: string;
   imageSortingPrompt?: string;
@@ -160,12 +164,44 @@ Deno.serve(async (req) => {
     patch.atlas_image_vision_enabled = body.imageVisionEnabled;
   }
 
+  if (body.saveGoogleImages !== undefined) {
+    const n = intInRange(body.saveGoogleImages, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "saveGoogleImages must be an integer 0-10" }, 400);
+    }
+    patch.atlas_save_google_images = n;
+  }
+
+  if (body.saveWebsiteImages !== undefined) {
+    const n = intInRange(body.saveWebsiteImages, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "saveWebsiteImages must be an integer 0-10" }, 400);
+    }
+    patch.atlas_save_website_images = n;
+  }
+
+  if (body.saveInstagramImages !== undefined) {
+    const n = intInRange(body.saveInstagramImages, 0, 30);
+    if (n === null) {
+      return json({ ok: false, error: "saveInstagramImages must be an integer 0-30" }, 400);
+    }
+    patch.atlas_save_instagram_images = n;
+  }
+
   if (body.analyzeGoogleImages !== undefined) {
     const n = intInRange(body.analyzeGoogleImages, 0, 10);
     if (n === null) {
       return json({ ok: false, error: "analyzeGoogleImages must be an integer 0-10" }, 400);
     }
     patch.atlas_analyze_google_images = n;
+  }
+
+  if (body.analyzeWebsiteImages !== undefined) {
+    const n = intInRange(body.analyzeWebsiteImages, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "analyzeWebsiteImages must be an integer 0-10" }, 400);
+    }
+    patch.atlas_analyze_website_images = n;
   }
 
   if (body.imageAnalysisPrompt !== undefined) {
@@ -224,7 +260,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_save_google_images, atlas_save_website_images, atlas_save_instagram_images, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -243,10 +279,14 @@ Deno.serve(async (req) => {
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
+    atlasSaveGoogleImages: data.atlas_save_google_images,
+    atlasSaveWebsiteImages: data.atlas_save_website_images,
+    atlasSaveInstagramImages: data.atlas_save_instagram_images,
     atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
+    atlasAnalyzeWebsiteImages: data.atlas_analyze_website_images,
+    atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
     atlasImageAnalysisPrompt: data.atlas_image_analysis_prompt,
     atlasImageSortingPrompt: data.atlas_image_sorting_prompt,
-    atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
     atlasPerRunCostCapUsd: data.atlas_per_run_cost_cap_usd,
     updatedAt: data.updated_at,
