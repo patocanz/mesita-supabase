@@ -129,7 +129,7 @@ Deno.serve(async (req) => {
   const { data: row } = await admin
     .from("venues")
     .select(
-      "name, address, city, category, instagram_url, facebook_url, website_url",
+      "name, address, city, category, instagram_url, facebook_url, website_url, google_stars_overall, google_review_count, editorial_summary",
     )
     .eq("id", venueId)
     .maybeSingle();
@@ -138,6 +138,15 @@ Deno.serve(async (req) => {
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
   const APIFY_KEY = Deno.env.get("APIFY_KEY");
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
+  const SERPER_KEY = Deno.env.get("SERPER_KEY");
+
+  // Only reach for Serper when Google Places came back thin — no rating, no
+  // editorial summary, or no website. Otherwise the Google spine already
+  // covers the SERP-level facts and we skip the extra call.
+  const googleThin =
+    row.google_stars_overall == null ||
+    !row.editorial_summary ||
+    !row.website_url;
 
   const sources: Record<string, unknown> = {};
   const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
@@ -146,9 +155,49 @@ Deno.serve(async (req) => {
   // slow actor doesn't stack latency and push the agent past the EF wall.
   let igBio = "";
   let siteMarkdown = "";
+  let serperText = "";
   const igHandle = instagramHandleFromUrl(row.instagram_url as string | null);
 
   await Promise.all([
+    // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
+    // purely as extra grounding for Perplexity, never as a rating source.
+    (async () => {
+      if (!SERPER_KEY || !googleThin) return;
+      try {
+        const q = [row.name, row.city].filter(Boolean).join(" ");
+        const r = await fetch("https://google.serper.dev/search", {
+          method: "POST",
+          headers: { "X-API-KEY": SERPER_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({ q, gl: "mx", hl: "es" }),
+        });
+        if (!r.ok) {
+          sources.serper = { ok: false, status: r.status };
+          return;
+        }
+        const d = (await r.json()) as {
+          knowledgeGraph?: Record<string, unknown>;
+          organic?: { snippet?: string }[];
+        };
+        const kg = d.knowledgeGraph ?? {};
+        const kgLine = [
+          typeof kg.title === "string" ? kg.title : "",
+          typeof kg.type === "string" ? kg.type : "",
+          typeof kg.description === "string" ? kg.description : "",
+          typeof kg.address === "string" ? `Address: ${kg.address}` : "",
+        ]
+          .filter(Boolean)
+          .join(". ");
+        const snippets = (d.organic ?? [])
+          .slice(0, 3)
+          .map((o) => o.snippet)
+          .filter((s): s is string => !!s)
+          .join("\n");
+        serperText = [kgLine, snippets].filter(Boolean).join("\n").slice(0, 3000);
+        sources.serper = { ok: !!serperText, reason: "google_thin" };
+      } catch {
+        sources.serper = { ok: false };
+      }
+    })(),
     // Apify → Instagram (followers + bio).
     (async () => {
       if (!APIFY_KEY || !igHandle) return;
@@ -228,6 +277,7 @@ Deno.serve(async (req) => {
   const locationLine = [row.address, row.city].filter(Boolean).join(", ");
   const grounding = [
     igBio ? `Instagram bio: ${igBio}` : "",
+    serperText ? `Search results:\n${serperText}` : "",
     siteMarkdown ? `Website content (excerpt):\n${siteMarkdown}` : "",
   ]
     .filter(Boolean)
