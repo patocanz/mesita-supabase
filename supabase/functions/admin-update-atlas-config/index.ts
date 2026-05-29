@@ -8,7 +8,7 @@
 // save one control at a time:
 //
 //   saveSnapshots   (boolean)  → atlas_save_snapshots
-//   gatherGoogleImages / gatherWebsiteImages / gatherInstagramPosts (≤10)
+//   gatherGoogleImages / gatherWebsiteImages (≤10), gatherInstagramPosts (≤30)
 //   analyzeGoogleImages / analyzeWebsiteImages / analyzeInstagramImages (≤10)
 //   saveTotalImages (≤20)      → atlas_save_total_images (source-independent)
 //   imageAnalysisPrompt / imageSortingPrompt
@@ -130,9 +130,9 @@ Deno.serve(async (req) => {
   }
 
   if (body.gatherInstagramPosts !== undefined) {
-    const n = intInRange(body.gatherInstagramPosts, 0, 10);
+    const n = intInRange(body.gatherInstagramPosts, 0, 30);
     if (n === null) {
-      return json({ ok: false, error: "gatherInstagramPosts must be an integer 0-10" }, 400);
+      return json({ ok: false, error: "gatherInstagramPosts must be an integer 0-30" }, 400);
     }
     patch.atlas_gather_instagram_posts = n;
   }
