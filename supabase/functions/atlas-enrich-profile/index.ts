@@ -42,6 +42,7 @@ import {
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
 const PERPLEXITY_MODEL = "sonar";
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape";
+const FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v1/search";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
 // Vision + sort always run on the cheap multimodal model — image work doesn't
@@ -358,33 +359,44 @@ Deno.serve(async (req) => {
 
   const needsDiscovery =
     socialLayer &&
-    !!PERPLEXITY_KEY &&
+    (!!FIRECRAWL_KEY || !!PERPLEXITY_KEY) &&
     !reuseDiscovery &&
     (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite);
   const runDiscovery = needsDiscovery && reserve("discovery", COST.perplexity);
 
   if (runDiscovery) {
-    const discoveryLocation = [row.address, row.city].filter(Boolean).join(", ");
-    const found = await discoverChannels(
-      PERPLEXITY_KEY!,
-      row.name as string,
-      discoveryLocation,
-      (row.category as string | null) ?? null,
-    );
-    if (found) {
-      if (!resolvedInstagram && found.instagram_url) resolvedInstagram = found.instagram_url;
-      if (!resolvedFacebook && found.facebook_url) resolvedFacebook = found.facebook_url;
-      if (!resolvedWebsite && found.website_url) resolvedWebsite = found.website_url;
-      discovered = found;
-      sources.discovery = {
-        ok: true,
-        instagram: !!found.instagram_url,
-        facebook: !!found.facebook_url,
-        website: !!found.website_url,
-      };
-    } else {
-      sources.discovery = { ok: false };
-    }
+    // Channel links resolve in the Atlas order: whatever Google already gave
+    // us (passed in via `have`) → Firecrawl Search on "<name> <city> <network>"
+    // → Perplexity as the last-resort fallback. Each result is host-validated
+    // and normalised to the canonical profile URL before we trust it.
+    const found = await resolveChannels({
+      firecrawlKey: FIRECRAWL_KEY,
+      perplexityKey: PERPLEXITY_KEY,
+      name: row.name as string,
+      city: (row.city as string | null) ?? null,
+      locationLine: [row.address, row.city].filter(Boolean).join(", "),
+      category: (row.category as string | null) ?? null,
+      have: {
+        instagram: resolvedInstagram,
+        facebook: resolvedFacebook,
+        website: resolvedWebsite,
+      },
+    });
+    if (!resolvedInstagram && found.instagram_url) resolvedInstagram = found.instagram_url;
+    if (!resolvedFacebook && found.facebook_url) resolvedFacebook = found.facebook_url;
+    if (!resolvedWebsite && found.website_url) resolvedWebsite = found.website_url;
+    discovered = {
+      instagram_url: resolvedInstagram,
+      facebook_url: resolvedFacebook,
+      website_url: resolvedWebsite,
+    };
+    sources.discovery = {
+      ok: true,
+      via: found.via,
+      instagram: !!resolvedInstagram,
+      facebook: !!resolvedFacebook,
+      website: !!resolvedWebsite,
+    };
   }
 
   // Persist any newly resolved channel so future reads + re-runs have them.
@@ -1140,19 +1152,232 @@ async function mirrorImages(
 
 // ── Discovery + parsing helpers ─────────────────────────────────────────────
 
-async function discoverChannels(
+type Channels = {
+  instagram_url: string | null;
+  facebook_url: string | null;
+  website_url: string | null;
+};
+
+// Resolve a venue's official channel URLs. Order (matches the Atlas catalog):
+//   1. whatever Google already gave us (passed in via `have`)
+//   2. Firecrawl Search on "<name> <city> <network>" — the strongest signal for
+//      socials, since the canonical profile is almost always the top result
+//   3. Perplexity — last-resort fallback for anything still missing
+// Only missing channels are searched, and every candidate is normalised to the
+// canonical profile URL + host-validated before we trust it.
+async function resolveChannels(opts: {
+  firecrawlKey?: string;
+  perplexityKey?: string;
+  name: string;
+  city: string | null;
+  locationLine: string;
+  category: string | null;
+  have: { instagram: string | null; facebook: string | null; website: string | null };
+}): Promise<Channels & { via: Record<string, string> }> {
+  let instagram = opts.have.instagram;
+  let facebook = opts.have.facebook;
+  let website = opts.have.website;
+  const via: Record<string, string> = {};
+  if (instagram) via.instagram = "google";
+  if (facebook) via.facebook = "google";
+  if (website) via.website = "google";
+
+  const cityPart = opts.city ? ` ${opts.city}` : "";
+
+  // 2. Firecrawl Search — one targeted query per missing channel.
+  if (opts.firecrawlKey) {
+    if (!instagram) {
+      const hit = pickInstagram(
+        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} instagram`),
+      );
+      if (hit) {
+        instagram = hit;
+        via.instagram = "firecrawl";
+      }
+    }
+    if (!facebook) {
+      const hit = pickFacebook(
+        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} facebook`),
+      );
+      if (hit) {
+        facebook = hit;
+        via.facebook = "firecrawl";
+      }
+    }
+    if (!website) {
+      const hit = pickWebsite(
+        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} official website`),
+      );
+      if (hit) {
+        website = hit;
+        via.website = "firecrawl";
+      }
+    }
+  }
+
+  // 3. Perplexity fallback — only if something's still missing.
+  if (opts.perplexityKey && (!instagram || !facebook || !website)) {
+    const pp = await discoverChannelsPerplexity(
+      opts.perplexityKey,
+      opts.name,
+      opts.locationLine,
+      opts.category,
+    );
+    if (pp) {
+      if (!instagram && pp.instagram_url) {
+        instagram = pp.instagram_url;
+        via.instagram = "perplexity";
+      }
+      if (!facebook && pp.facebook_url) {
+        facebook = pp.facebook_url;
+        via.facebook = "perplexity";
+      }
+      if (!website && pp.website_url) {
+        website = pp.website_url;
+        via.website = "perplexity";
+      }
+    }
+  }
+
+  return { instagram_url: instagram, facebook_url: facebook, website_url: website, via };
+}
+
+// Web search via Firecrawl. Returns the result URLs (best-first). Best-effort.
+async function firecrawlSearch(
+  key: string,
+  query: string,
+  limit = 8,
+): Promise<string[]> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    let r: Response;
+    try {
+      r = await fetch(FIRECRAWL_SEARCH_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ query, limit }),
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) return [];
+    const d = (await r.json()) as { data?: unknown[]; results?: unknown[] };
+    const arr = Array.isArray(d.data) ? d.data : Array.isArray(d.results) ? d.results : [];
+    return arr
+      .map((x) => (x && typeof (x as { url?: unknown }).url === "string" ? (x as { url: string }).url : ""))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// First search result that resolves to a real Instagram profile (skips
+// /p/, /reel/, /explore/ etc. via instagramHandleFromUrl) → canonical URL.
+function pickInstagram(urls: string[]): string | null {
+  for (const u of urls) {
+    const handle = instagramHandleFromUrl(u);
+    if (handle) return `https://www.instagram.com/${handle}`;
+  }
+  return null;
+}
+
+// First search result that resolves to a real Facebook page (skips photo.php,
+// /watch, /events, etc.) → canonical URL.
+function pickFacebook(urls: string[]): string | null {
+  for (const u of urls) {
+    const page = facebookPageFromUrl(u);
+    if (page) return page;
+  }
+  return null;
+}
+
+// First search result that's a plausible official website: an http(s) URL
+// whose host isn't a social network, directory, or aggregator.
+function pickWebsite(urls: string[]): string | null {
+  const blocked = [
+    "instagram.com",
+    "facebook.com",
+    "fb.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "youtu.be",
+    "google.com",
+    "goo.gl",
+    "maps.app.goo.gl",
+    "tripadvisor.com",
+    "tripadvisor.com.mx",
+    "yelp.com",
+    "foursquare.com",
+    "opentable.com",
+    "opentable.com.mx",
+    "wikipedia.org",
+    "linktr.ee",
+    "linkedin.com",
+    "threads.net",
+    "wa.me",
+    "menudo.app",
+  ];
+  for (const u of urls) {
+    const valid = validHost(u, null);
+    if (!valid) continue;
+    try {
+      const h = new URL(valid).hostname.toLowerCase().replace(/^www\./, "");
+      if (blocked.some((b) => h === b || h.endsWith(`.${b}`))) continue;
+      return valid;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+// Extract a venue's canonical Facebook page URL from any FB link, rejecting
+// non-page paths (photos, videos, events, share/login). profile.php?id= pages
+// are kept (legacy page form).
+function facebookPageFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = u.hostname
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .replace(/^m\./, "")
+    .replace(/^[a-z]{2}-[a-z]{2}\./, "");
+  if (!(host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.com")) {
+    return null;
+  }
+  const seg = u.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
+  if (!seg) return null;
+  if (seg === "profile.php") {
+    const id = u.searchParams.get("id");
+    return id && /^\d+$/.test(id) ? `https://www.facebook.com/profile.php?id=${id}` : null;
+  }
+  const reserved = new Set([
+    "photo.php", "photo", "photos", "watch", "events", "event", "videos", "video",
+    "reel", "reels", "story.php", "stories", "sharer", "sharer.php", "login",
+    "pages", "groups", "marketplace", "media", "people", "help", "policies",
+    "permalink.php", "search", "hashtag", "p",
+  ]);
+  if (reserved.has(seg)) return null;
+  return `https://www.facebook.com/${u.pathname.split("/").filter(Boolean)[0]}`;
+}
+
+// Perplexity fallback: resolve channel URLs from search. An LLM, so every URL
+// it returns is host-validated before we trust it.
+async function discoverChannelsPerplexity(
   key: string,
   name: string,
   locationLine: string,
   category: string | null,
-): Promise<
-  | {
-      instagram_url: string | null;
-      facebook_url: string | null;
-      website_url: string | null;
-    }
-  | null
-> {
+): Promise<Channels | null> {
   const prompt =
     `Find the official online presence of the venue "${name}"` +
     (locationLine ? ` located at ${locationLine}` : "") +
@@ -1193,8 +1418,10 @@ async function discoverChannels(
       | null;
     if (!parsed) return null;
     return {
-      instagram_url: validHost(parsed.instagram_url, ["instagram.com"]),
-      facebook_url: validHost(parsed.facebook_url, ["facebook.com", "fb.com"]),
+      instagram_url: pickInstagram([String(parsed.instagram_url ?? "")]) ??
+        validHost(parsed.instagram_url, ["instagram.com"]),
+      facebook_url: facebookPageFromUrl(String(parsed.facebook_url ?? "")) ??
+        validHost(parsed.facebook_url, ["facebook.com", "fb.com"]),
       website_url: validHost(parsed.website_url, null),
     };
   } catch {
