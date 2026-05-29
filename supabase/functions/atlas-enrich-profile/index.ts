@@ -157,7 +157,7 @@ Deno.serve(async (req) => {
   const { data: row } = await admin
     .from("venues")
     .select(
-      "name, address, city, category, instagram_url, facebook_url, website_url, google_place_id, google_stars_overall, google_review_count, editorial_summary",
+      "name, address, city, category, instagram_url, facebook_url, website_url, google_place_id, google_stars_overall, google_review_count, editorial_summary, photos",
     )
     .eq("id", venueId)
     .maybeSingle();
@@ -168,12 +168,16 @@ Deno.serve(async (req) => {
   // callers don't pass overrides (the DB is the single source of truth).
   const { data: cfg } = await admin
     .from("app_settings")
-    .select("atlas_source_tier_ceiling, atlas_synthesis_quality")
+    .select(
+      "atlas_source_tier_ceiling, atlas_synthesis_quality, atlas_save_instagram_images",
+    )
     .eq("id", 1)
     .maybeSingle();
   const tierCeiling = (cfg?.atlas_source_tier_ceiling as number | undefined) ?? 3;
   const synthesisQuality =
     (cfg?.atlas_synthesis_quality as string | undefined) ?? "economy";
+  const saveInstagramImages =
+    (cfg?.atlas_save_instagram_images as number | undefined) ?? 20;
   // Whole social/website/SERP layer runs only when the ceiling allows tier 2.
   const socialLayer = tierCeiling >= SOCIAL_LAYER_TIER;
 
@@ -264,6 +268,7 @@ Deno.serve(async (req) => {
   let siteMarkdown = "";
   let serperText = "";
   let googleReviewsText = "";
+  let igImageUrls: string[] = [];
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
   const placeId =
     typeof row.google_place_id === "string" ? row.google_place_id : null;
@@ -281,39 +286,44 @@ Deno.serve(async (req) => {
           maxReviews: 100,
           language: "es",
           reviewsSort: "newest",
-          scrapeReviewsPersonalData: false,
+          // include reviewer name + text (don't strip personal data)
+          reviewsPersonalData: true,
         },
         APIFY_KEY,
         60000,
       );
       const p = items?.[0] as Record<string, unknown> | undefined;
       const raw = Array.isArray(p?.reviews) ? (p!.reviews as Record<string, unknown>[]) : [];
+      const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
       const reviews = raw
         .slice(0, 100)
         .map((r) => ({
-          author: typeof r.name === "string" ? r.name : null,
-          rating: numOf(r.stars),
-          text: typeof r.text === "string" ? r.text : null,
+          author: str(r.name) ?? str(r.reviewerName),
+          rating: numOf(r.stars) ?? numOf(r.rating) ?? numOf(r.starRating),
+          text: str(r.text) ?? str(r.textTranslated) ?? str(r.reviewText),
           published:
-            typeof r.publishedAtDate === "string"
-              ? r.publishedAtDate
-              : typeof r.publishAt === "string"
-                ? r.publishAt
-                : null,
+            str(r.publishedAtDate) ?? str(r.publishAt) ?? str(r.publishedAt),
         }))
         .filter((r) => r.text || r.rating != null);
       if (reviews.length > 0) {
         update.google_reviews = reviews;
         const cnt = numOf(p?.reviewsCount);
         if (cnt != null) update.google_review_count = cnt;
-        googleReviewsText = reviews
+        const withText = reviews.filter((r) => r.text);
+        googleReviewsText = withText
           .slice(0, 12)
-          .map((r) => (r.text ? `(${r.rating ?? "?"}★) ${r.text}` : ""))
-          .filter(Boolean)
+          .map((r) => `(${r.rating ?? "?"}★) ${r.text}`)
           .join("\n")
           .slice(0, 3000);
       }
-      sources.apify_google_reviews = { ok: reviews.length > 0, count: reviews.length };
+      // Debug: capture the raw field names of the first review so a wrong
+      // mapping is diagnosable from enrichment_sources without re-instrumenting.
+      sources.apify_google_reviews = {
+        ok: reviews.length > 0,
+        count: reviews.length,
+        with_text: reviews.filter((r) => r.text).length,
+        sample_keys: raw[0] ? Object.keys(raw[0]).slice(0, 25) : [],
+      };
     })(),
     // Serper → SERP knowledge panel, ONLY when Google came back thin. Used
     // purely as extra grounding for Perplexity, never as a rating source.
@@ -354,7 +364,7 @@ Deno.serve(async (req) => {
         sources.serper = { ok: false };
       }
     })(),
-    // Apify → Instagram (followers + bio).
+    // Apify → Instagram: followers + bio + post IMAGES (top by likes).
     (async () => {
       if (!socialLayer || !APIFY_KEY || !igHandle) return;
       const items = await runApifyActor<Record<string, unknown>>(
@@ -367,7 +377,28 @@ Deno.serve(async (req) => {
         const followers = numOf(p.followersCount);
         if (followers != null) update.instagram_followers_count = followers;
         if (typeof p.biography === "string") igBio = p.biography;
-        sources.apify_instagram = { handle: igHandle, ok: true };
+        // Post images: profile scraper bundles latestPosts. Keep images only
+        // (drop videos), rank by likes, take top N (save cap). Sorting/vision
+        // happens elsewhere — here we just gather + rank the candidates.
+        const posts = Array.isArray(p.latestPosts)
+          ? (p.latestPosts as Record<string, unknown>[])
+          : [];
+        igImageUrls = posts
+          .filter(
+            (po) =>
+              po.type !== "Video" &&
+              typeof po.displayUrl === "string" &&
+              (po.displayUrl as string).startsWith("http"),
+          )
+          .sort((a, b) => (numOf(b.likesCount) ?? 0) - (numOf(a.likesCount) ?? 0))
+          .slice(0, saveInstagramImages)
+          .map((po) => po.displayUrl as string);
+        sources.apify_instagram = {
+          handle: igHandle,
+          ok: true,
+          posts: posts.length,
+          images: igImageUrls.length,
+        };
       } else {
         sources.apify_instagram = { handle: igHandle, ok: false };
       }
@@ -421,6 +452,29 @@ Deno.serve(async (req) => {
       }
     })(),
   ]);
+
+  // ── Merge Instagram post images into the venue photo set ─────────────────
+  // business-create-unit already saved Google/website photos. Append the
+  // Instagram images (dedup, ceiling 50) so the gallery sources from IG too.
+  // (Vision re-ranking across the merged set is a later phase.)
+  if (igImageUrls.length > 0) {
+    const existing = Array.isArray(row.photos) ? (row.photos as string[]) : [];
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const u of [...existing, ...igImageUrls]) {
+      if (typeof u === "string" && u && !seen.has(u)) {
+        merged.push(u);
+        seen.add(u);
+        if (merged.length >= 50) break;
+      }
+    }
+    update.photos = merged;
+    sources.photos = {
+      existing: existing.length,
+      instagram_added: merged.length - existing.length,
+      total: merged.length,
+    };
+  }
 
   // ── OpenAI: grounded synthesis (Research Backbone) ───────────────────────
   // Reads ONLY the gathered source material — no web — so it can't drift from
