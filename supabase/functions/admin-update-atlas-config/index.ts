@@ -105,10 +105,12 @@ Deno.serve(async (req) => {
   }
 
   if (body.googleImages !== undefined) {
-    const n = intInRange(body.googleImages, 0, 20);
+    // Google photos come from the Places API's default order (Google's own
+    // ranking), which returns at most 10 — so the cap is 0-10.
+    const n = intInRange(body.googleImages, 0, 10);
     if (n === null) {
       return json(
-        { ok: false, error: "googleImages must be an integer 0-20" },
+        { ok: false, error: "googleImages must be an integer 0-10" },
         400,
       );
     }
