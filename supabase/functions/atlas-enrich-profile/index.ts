@@ -941,50 +941,60 @@ function extractWebsiteImages(
   return out;
 }
 
-// Vision pass: describe each image with the admin analysis prompt. One call,
-// all images in order, returns descriptions aligned to the input order.
+// Vision pass: describe each image with the admin analysis prompt. ONE call
+// PER image, all fired CONCURRENTLY (Promise.all) — so each photo gets the
+// model's full attention (sharper descriptions, no shared token budget) and a
+// single bad image fails in isolation. Returns descriptions aligned to the
+// input order; a failed/empty image yields "" so indices stay meaningful.
 async function visionDescribe(
   openaiKey: string,
   urls: string[],
   prompt: string,
 ): Promise<string[] | null> {
-  const content: Record<string, unknown>[] = [
-    {
-      type: "text",
-      text:
-        prompt +
-        `\n\nYou are given ${urls.length} venue photos, in order. Return a SINGLE ` +
-        `JSON object {"descriptions": [string, ...]} with exactly one short ` +
-        `description per image, in the same order. No prose, no fences.`,
-    },
-  ];
-  for (const url of urls) {
-    content.push({ type: "image_url", image_url: { url, detail: "low" } });
-  }
+  const describeOne = async (url: string): Promise<string> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    try {
+      const r = await fetch(OPENAI_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: VISION_MODEL,
+          temperature: 0,
+          max_tokens: 200,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url, detail: "low" } },
+              ],
+            },
+          ],
+        }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) return "";
+      const data = (await r.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      return (data.choices?.[0]?.message?.content ?? "").trim();
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
   try {
-    const r = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: VISION_MODEL,
-        temperature: 0,
-        messages: [{ role: "user", content }],
-        response_format: { type: "json_object" },
-        max_tokens: 1500,
-      }),
-    });
-    if (!r.ok) return null;
-    const data = (await r.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const obj = safeParseJson(data.choices?.[0]?.message?.content ?? "");
-    const arr = (obj as { descriptions?: unknown })?.descriptions;
-    if (!Array.isArray(arr)) return null;
-    // Align to input length: pad/truncate so indices stay meaningful.
-    return urls.map((_, i) => (typeof arr[i] === "string" ? (arr[i] as string) : ""));
+    const descriptions = await Promise.all(urls.map((u) => describeOne(u)));
+    // If every single call failed, treat the whole pass as failed so the
+    // caller keeps the pre-vision order rather than sorting on empty strings.
+    if (descriptions.every((d) => !d)) return null;
+    return descriptions;
   } catch {
     return null;
   }
