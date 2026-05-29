@@ -65,6 +65,8 @@ const QUALITY_MODEL: Record<string, string> = {
 const SOCIAL_LAYER_TIER = 2;
 
 // Hard ceiling on photos persisted to the venue, regardless of per-source caps.
+// Safety ceiling on the gathered candidate pool before save (the real,
+// source-independent save cap is atlas_save_total_images, applied at the end).
 const PHOTO_CEILING = 50;
 
 // Snapshots: the Storage bucket + how long a snapshot is fresh enough that a
@@ -238,9 +240,10 @@ Deno.serve(async (req) => {
         "atlas_synthesis_quality",
         "atlas_pre_read_snapshots",
         "atlas_save_snapshots",
-        "atlas_save_google_images",
-        "atlas_save_website_images",
-        "atlas_save_instagram_images",
+        "atlas_gather_google_images",
+        "atlas_gather_website_images",
+        "atlas_gather_instagram_posts",
+        "atlas_save_total_images",
         "atlas_image_vision_enabled",
         "atlas_analyze_google_images",
         "atlas_analyze_website_images",
@@ -261,12 +264,17 @@ Deno.serve(async (req) => {
     (cfg?.atlas_synthesis_quality as string | undefined) ?? "economy";
   const preReadSnapshots = (cfg?.atlas_pre_read_snapshots as boolean) ?? true;
   const saveSnapshots = (cfg?.atlas_save_snapshots as boolean) ?? true;
-  const saveGoogleImages = num(cfg?.atlas_save_google_images, 10);
-  const saveWebsiteImages = num(cfg?.atlas_save_website_images, 10);
-  const saveInstagramImages = num(cfg?.atlas_save_instagram_images, 20);
+  // GATHER caps — how many to PULL per source before anything else.
+  const gatherGoogleImages = num(cfg?.atlas_gather_google_images, 10);
+  const gatherWebsiteImages = num(cfg?.atlas_gather_website_images, 10);
+  const gatherInstagramPosts = num(cfg?.atlas_gather_instagram_posts, 10);
+  // SAVE cap — final count persisted to the venue, SOURCE-INDEPENDENT, applied
+  // after analyze + rubric sort.
+  const saveTotalImages = num(cfg?.atlas_save_total_images, 20);
   const visionEnabled = (cfg?.atlas_image_vision_enabled as boolean) ?? true;
-  const analyzeGoogleImages = num(cfg?.atlas_analyze_google_images, 5);
-  const analyzeWebsiteImages = num(cfg?.atlas_analyze_website_images, 5);
+  // ANALYZE caps — how many of the gathered images per source go to vision.
+  const analyzeGoogleImages = num(cfg?.atlas_analyze_google_images, 10);
+  const analyzeWebsiteImages = num(cfg?.atlas_analyze_website_images, 10);
   const analyzeInstagramImages = num(cfg?.atlas_analyze_instagram_images, 10);
   const imageAnalysisPrompt =
     (cfg?.atlas_image_analysis_prompt as string | undefined)?.trim() ||
@@ -474,7 +482,7 @@ Deno.serve(async (req) => {
         {
           placeIds: [placeId],
           maxReviews: 100,
-          maxImages: Math.max(0, saveGoogleImages),
+          maxImages: Math.max(0, gatherGoogleImages),
           language: "es",
           reviewsSort: "newest",
           reviewsPersonalData: true,
@@ -505,7 +513,7 @@ Deno.serve(async (req) => {
       const imgs = Array.isArray(p?.imageUrls) ? (p!.imageUrls as unknown[]) : [];
       googleImages = imgs
         .filter((u): u is string => typeof u === "string" && u.startsWith("http"))
-        .slice(0, saveGoogleImages);
+        .slice(0, gatherGoogleImages);
       sources.apify_google_reviews = {
         ok: reviews.length > 0,
         count: reviews.length,
@@ -567,6 +575,8 @@ Deno.serve(async (req) => {
         const posts = Array.isArray(p.latestPosts)
           ? (p.latestPosts as Record<string, unknown>[])
           : [];
+        // Metadata sort for Instagram = by likes (most-liked posts first),
+        // then take the gather cap.
         instagramImages = posts
           .filter(
             (po) =>
@@ -575,7 +585,7 @@ Deno.serve(async (req) => {
               (po.displayUrl as string).startsWith("http"),
           )
           .sort((a, b) => (numOf(b.likesCount) ?? 0) - (numOf(a.likesCount) ?? 0))
-          .slice(0, saveInstagramImages)
+          .slice(0, gatherInstagramPosts)
           .map((po) => po.displayUrl as string);
         sources.apify_instagram = {
           handle: igHandle,
@@ -626,12 +636,16 @@ Deno.serve(async (req) => {
             data?: { markdown?: string; metadata?: { ogImage?: string } };
           };
           siteMarkdown = (data.data?.markdown ?? "").slice(0, 6000);
-          websiteImages = extractWebsiteImages(
+          // Extract a generous candidate pool, then metadata-sort by image
+          // SIZE (largest file first ≈ highest-res hero shots) and take the
+          // gather cap.
+          const pool = extractWebsiteImages(
             data.data?.markdown ?? "",
             data.data?.metadata?.ogImage,
             resolvedWebsite!,
-            saveWebsiteImages,
+            30,
           );
+          websiteImages = (await sizeRankImages(pool)).slice(0, gatherWebsiteImages);
           sources.firecrawl = { ok: !!siteMarkdown, images: websiteImages.length };
         } else {
           sources.firecrawl = { ok: false, status: r.status };
@@ -669,16 +683,15 @@ Deno.serve(async (req) => {
     sources.image_mirror = { candidates: mirrorBefore, mirrored };
   }
 
-  // ── Image funnel: SAVE (pre-select) ──────────────────────────────────────
-  // Each source contributes its already-capped bucket. business-create-unit
-  // may have seeded Places photos into row.photos — fold those into the Google
-  // bucket so we never lose them. Merge all, dedup, hard-cap at PHOTO_CEILING.
+  // ── Image funnel: build the gathered pool (post metadata-sort) ───────────
+  // Each source contributes its gather-capped, metadata-sorted bucket (Google
+  // in Google's order, Website by size, Instagram by likes). business-create-
+  // unit may have seeded Places photos into row.photos — fold those into the
+  // Google bucket so we never lose them, capped at the Google GATHER cap.
   const existingPhotos = Array.isArray(row.photos) ? (row.photos as string[]) : [];
-  // Google bucket = fresh compass photos first, then any Places photos the
-  // create step already seeded, deduped and capped at the Google save cap.
   const googleBucket = dedup([...googleImages, ...existingPhotos]).slice(
     0,
-    saveGoogleImages,
+    gatherGoogleImages,
   );
   const saved: Img[] = [];
   const savedSeen = new Set<string>();
@@ -691,19 +704,20 @@ Deno.serve(async (req) => {
   for (const u of websiteImages) pushImg(u, "website");
   for (const u of instagramImages) pushImg(u, "instagram");
 
-  // ── Image funnel: ANALYZE (vision) → SORT (text) ─────────────────────────
-  // Take the per-source analyze caps off the top of each bucket, have the
-  // vision model DESCRIBE each (image_analysis_prompt), then have a text model
-  // RANK those descriptions (image_sorting_prompt). Reorder the saved set so
-  // the best cover leads; un-analyzed images keep their original order behind.
-  let finalPhotos = saved.map((s) => s.url);
+  // ── Image funnel: ANALYZE (vision) → SORT (text) → SAVE (top N) ──────────
+  // Take the per-source analyze caps off the top of each metadata-sorted
+  // bucket, have the vision model DESCRIBE each (image_analysis_prompt), then a
+  // text model RANK those descriptions (image_sorting_prompt). The final SAVE
+  // cap (saveTotalImages) is SOURCE-INDEPENDENT — keep the best N overall.
+  let finalPhotos = saved.map((s) => s.url).slice(0, saveTotalImages);
   let funnelDiag: Record<string, unknown> = {
-    saved: saved.length,
+    gathered: saved.length,
     by_source: {
       google: saved.filter((s) => s.source === "google").length,
       website: saved.filter((s) => s.source === "website").length,
       instagram: saved.filter((s) => s.source === "instagram").length,
     },
+    save_cap: saveTotalImages,
     vision: false,
   };
   if (runVision && saved.length > 1) {
@@ -736,13 +750,16 @@ Deno.serve(async (req) => {
           .map((i) => toAnalyze[i].url);
         const analyzedSet = new Set(toAnalyze.map((i) => i.url));
         const rest = saved.map((s) => s.url).filter((u) => !analyzedSet.has(u));
-        finalPhotos = dedup([...ranked, ...rest]).slice(0, PHOTO_CEILING);
+        // Rubric-ranked images lead; un-analyzed gathered images follow in
+        // metadata order. Then keep only the top N overall (source-independent).
+        finalPhotos = dedup([...ranked, ...rest]).slice(0, saveTotalImages);
         funnelDiag = {
           ...funnelDiag,
           vision: true,
           analyzed: toAnalyze.length,
           described: !!descriptions,
           sorted: true,
+          saved: finalPhotos.length,
         };
       } else {
         funnelDiag = { ...funnelDiag, vision: true, analyzed: toAnalyze.length, sorted: false };
@@ -939,6 +956,34 @@ function extractWebsiteImages(
   let m: RegExpExecArray | null;
   while ((m = re.exec(markdown)) && out.length < cap) add(m[1]);
   return out;
+}
+
+// Metadata sort for website images = by file SIZE, largest first (a decent
+// proxy for "the high-res hero shots, not tracking pixels / icons"). HEADs each
+// URL for Content-Length in parallel; URLs that don't answer keep their
+// original (markdown) order behind the sized ones. Best-effort.
+async function sizeRankImages(urls: string[]): Promise<string[]> {
+  if (urls.length <= 1) return urls;
+  const sized = await Promise.all(
+    urls.map(async (url, i) => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const r = await fetch(url, { method: "HEAD", signal: ctrl.signal });
+        const len = Number(r.headers.get("content-length") ?? "");
+        return { url, i, size: Number.isFinite(len) ? len : -1 };
+      } catch {
+        return { url, i, size: -1 };
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+  );
+  sized.sort((a, b) => {
+    if (b.size !== a.size) return b.size - a.size; // larger first; unknown (-1) last
+    return a.i - b.i; // stable on original order
+  });
+  return sized.map((s) => s.url);
 }
 
 // Vision pass: describe each image with the admin analysis prompt. ONE call

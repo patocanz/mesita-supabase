@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
   const { data, error } = await admin
     .from("app_settings")
     .select(
-      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_save_google_images, atlas_save_website_images, atlas_save_instagram_images, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "auto_verify_ai_call, auto_verify_ai_email, auto_verify_video, atlas_pre_read_snapshots, atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_gather_google_images, atlas_gather_website_images, atlas_gather_instagram_posts, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_save_total_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .eq("id", 1)
     .maybeSingle();
@@ -61,17 +61,17 @@ Deno.serve(async (req) => {
     atlasPreReadSnapshots: data.atlas_pre_read_snapshots,
     atlasSaveSnapshots: data.atlas_save_snapshots,
     atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
-    atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
+    atlasGatherGoogleImages: data.atlas_gather_google_images,
+    atlasGatherWebsiteImages: data.atlas_gather_website_images,
+    atlasGatherInstagramPosts: data.atlas_gather_instagram_posts,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
-    atlasSaveGoogleImages: data.atlas_save_google_images,
-    atlasSaveWebsiteImages: data.atlas_save_website_images,
-    atlasSaveInstagramImages: data.atlas_save_instagram_images,
     atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
     atlasAnalyzeWebsiteImages: data.atlas_analyze_website_images,
     atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
+    atlasSaveTotalImages: data.atlas_save_total_images,
     atlasImageAnalysisPrompt: data.atlas_image_analysis_prompt,
     atlasImageSortingPrompt: data.atlas_image_sorting_prompt,
     atlasSynthesisQuality: data.atlas_synthesis_quality,

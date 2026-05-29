@@ -8,9 +8,10 @@
 // save one control at a time:
 //
 //   saveSnapshots   (boolean)  → atlas_save_snapshots
-//   analyzeGoogleImages / analyzeInstagramImages / imageAnalysisPrompt /
-//   imageSortingPrompt
-//   instagramPosts  (0-50)     → atlas_research_instagram_posts
+//   gatherGoogleImages / gatherWebsiteImages / gatherInstagramPosts (≤10)
+//   analyzeGoogleImages / analyzeWebsiteImages / analyzeInstagramImages (≤10)
+//   saveTotalImages (≤20)      → atlas_save_total_images (source-independent)
+//   imageAnalysisPrompt / imageSortingPrompt
 //
 // The separate pre-read toggle keeps its own EF (admin-set-atlas-pre-read).
 //
@@ -28,20 +29,21 @@ import {
 type Body = {
   saveSnapshots?: boolean;
   snapshotOnBusinessEdit?: boolean;
-  instagramPosts?: number;
   // Sourcing
   sourceTierCeiling?: number;
   sourceOverrides?: Record<string, unknown>;
   // Data depth
   websiteCrawlMaxPages?: number;
-  // Analysis
+  // Image funnel — GATHER (pull per source, ≤10)
+  gatherGoogleImages?: number;
+  gatherWebsiteImages?: number;
+  gatherInstagramPosts?: number;
+  // Image funnel — ANALYZE (vision per source, ≤10) + final SAVE (≤20, all sources)
   imageVisionEnabled?: boolean;
-  saveGoogleImages?: number;
-  saveWebsiteImages?: number;
-  saveInstagramImages?: number;
   analyzeGoogleImages?: number;
   analyzeWebsiteImages?: number;
   analyzeInstagramImages?: number;
+  saveTotalImages?: number;
   imageAnalysisPrompt?: string;
   imageSortingPrompt?: string;
   synthesisQuality?: string;
@@ -110,15 +112,29 @@ Deno.serve(async (req) => {
     patch.atlas_snapshot_on_business_edit = body.snapshotOnBusinessEdit;
   }
 
-  if (body.instagramPosts !== undefined) {
-    const n = intInRange(body.instagramPosts, 0, 50);
+  // ── Gather caps (pull per source) ───────────────────────────────────────
+  if (body.gatherGoogleImages !== undefined) {
+    const n = intInRange(body.gatherGoogleImages, 0, 10);
     if (n === null) {
-      return json(
-        { ok: false, error: "instagramPosts must be an integer 0-50" },
-        400,
-      );
+      return json({ ok: false, error: "gatherGoogleImages must be an integer 0-10" }, 400);
     }
-    patch.atlas_research_instagram_posts = n;
+    patch.atlas_gather_google_images = n;
+  }
+
+  if (body.gatherWebsiteImages !== undefined) {
+    const n = intInRange(body.gatherWebsiteImages, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "gatherWebsiteImages must be an integer 0-10" }, 400);
+    }
+    patch.atlas_gather_website_images = n;
+  }
+
+  if (body.gatherInstagramPosts !== undefined) {
+    const n = intInRange(body.gatherInstagramPosts, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "gatherInstagramPosts must be an integer 0-10" }, 400);
+    }
+    patch.atlas_gather_instagram_posts = n;
   }
 
   // ── Sourcing ──────────────────────────────────────────────────────────
@@ -164,28 +180,12 @@ Deno.serve(async (req) => {
     patch.atlas_image_vision_enabled = body.imageVisionEnabled;
   }
 
-  if (body.saveGoogleImages !== undefined) {
-    const n = intInRange(body.saveGoogleImages, 0, 10);
+  if (body.saveTotalImages !== undefined) {
+    const n = intInRange(body.saveTotalImages, 0, 20);
     if (n === null) {
-      return json({ ok: false, error: "saveGoogleImages must be an integer 0-10" }, 400);
+      return json({ ok: false, error: "saveTotalImages must be an integer 0-20" }, 400);
     }
-    patch.atlas_save_google_images = n;
-  }
-
-  if (body.saveWebsiteImages !== undefined) {
-    const n = intInRange(body.saveWebsiteImages, 0, 10);
-    if (n === null) {
-      return json({ ok: false, error: "saveWebsiteImages must be an integer 0-10" }, 400);
-    }
-    patch.atlas_save_website_images = n;
-  }
-
-  if (body.saveInstagramImages !== undefined) {
-    const n = intInRange(body.saveInstagramImages, 0, 30);
-    if (n === null) {
-      return json({ ok: false, error: "saveInstagramImages must be an integer 0-30" }, 400);
-    }
-    patch.atlas_save_instagram_images = n;
+    patch.atlas_save_total_images = n;
   }
 
   if (body.analyzeGoogleImages !== undefined) {
@@ -219,9 +219,9 @@ Deno.serve(async (req) => {
   }
 
   if (body.analyzeInstagramImages !== undefined) {
-    const n = intInRange(body.analyzeInstagramImages, 0, 20);
+    const n = intInRange(body.analyzeInstagramImages, 0, 10);
     if (n === null) {
-      return json({ ok: false, error: "analyzeInstagramImages must be an integer 0-20" }, 400);
+      return json({ ok: false, error: "analyzeInstagramImages must be an integer 0-10" }, 400);
     }
     patch.atlas_analyze_instagram_images = n;
   }
@@ -260,7 +260,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_save_google_images, atlas_save_website_images, atlas_save_instagram_images, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_gather_google_images, atlas_gather_website_images, atlas_gather_instagram_posts, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_save_total_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -274,17 +274,17 @@ Deno.serve(async (req) => {
     ok: true,
     atlasSaveSnapshots: data.atlas_save_snapshots,
     atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
-    atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
+    atlasGatherGoogleImages: data.atlas_gather_google_images,
+    atlasGatherWebsiteImages: data.atlas_gather_website_images,
+    atlasGatherInstagramPosts: data.atlas_gather_instagram_posts,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
-    atlasSaveGoogleImages: data.atlas_save_google_images,
-    atlasSaveWebsiteImages: data.atlas_save_website_images,
-    atlasSaveInstagramImages: data.atlas_save_instagram_images,
     atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
     atlasAnalyzeWebsiteImages: data.atlas_analyze_website_images,
     atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
+    atlasSaveTotalImages: data.atlas_save_total_images,
     atlasImageAnalysisPrompt: data.atlas_image_analysis_prompt,
     atlasImageSortingPrompt: data.atlas_image_sorting_prompt,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
