@@ -8,7 +8,7 @@
 // save one control at a time:
 //
 //   saveSnapshots   (boolean)  → atlas_save_snapshots
-//   googleImages    (0-20)     → atlas_research_google_images
+//   analyzeGoogleImages / analyzeWebsiteImages / analyzeInstagramImages
 //   instagramPosts  (0-50)     → atlas_research_instagram_posts
 //
 // The separate pre-read toggle keeps its own EF (admin-set-atlas-pre-read).
@@ -27,7 +27,6 @@ import {
 type Body = {
   saveSnapshots?: boolean;
   snapshotOnBusinessEdit?: boolean;
-  googleImages?: number;
   instagramPosts?: number;
   // Sourcing
   sourceTierCeiling?: number;
@@ -37,7 +36,9 @@ type Body = {
   websiteCrawlMaxPages?: number;
   // Analysis
   imageVisionEnabled?: boolean;
-  maxImagesAnalyzed?: number;
+  analyzeGoogleImages?: number;
+  analyzeWebsiteImages?: number;
+  analyzeInstagramImages?: number;
   synthesisQuality?: string;
   perRunCostCapUsd?: number;
 };
@@ -104,19 +105,6 @@ Deno.serve(async (req) => {
     patch.atlas_snapshot_on_business_edit = body.snapshotOnBusinessEdit;
   }
 
-  if (body.googleImages !== undefined) {
-    // Google photos come from the Places API's default order (Google's own
-    // ranking), which returns at most 10 — so the cap is 0-10.
-    const n = intInRange(body.googleImages, 0, 10);
-    if (n === null) {
-      return json(
-        { ok: false, error: "googleImages must be an integer 0-10" },
-        400,
-      );
-    }
-    patch.atlas_research_google_images = n;
-  }
-
   if (body.instagramPosts !== undefined) {
     const n = intInRange(body.instagramPosts, 0, 50);
     if (n === null) {
@@ -179,15 +167,28 @@ Deno.serve(async (req) => {
     patch.atlas_image_vision_enabled = body.imageVisionEnabled;
   }
 
-  if (body.maxImagesAnalyzed !== undefined) {
-    const n = intInRange(body.maxImagesAnalyzed, 0, 100);
+  if (body.analyzeGoogleImages !== undefined) {
+    const n = intInRange(body.analyzeGoogleImages, 0, 10);
     if (n === null) {
-      return json(
-        { ok: false, error: "maxImagesAnalyzed must be an integer 0-100" },
-        400,
-      );
+      return json({ ok: false, error: "analyzeGoogleImages must be an integer 0-10" }, 400);
     }
-    patch.atlas_max_images_analyzed = n;
+    patch.atlas_analyze_google_images = n;
+  }
+
+  if (body.analyzeWebsiteImages !== undefined) {
+    const n = intInRange(body.analyzeWebsiteImages, 0, 10);
+    if (n === null) {
+      return json({ ok: false, error: "analyzeWebsiteImages must be an integer 0-10" }, 400);
+    }
+    patch.atlas_analyze_website_images = n;
+  }
+
+  if (body.analyzeInstagramImages !== undefined) {
+    const n = intInRange(body.analyzeInstagramImages, 0, 20);
+    if (n === null) {
+      return json({ ok: false, error: "analyzeInstagramImages must be an integer 0-20" }, 400);
+    }
+    patch.atlas_analyze_instagram_images = n;
   }
 
   if (body.synthesisQuality !== undefined) {
@@ -224,7 +225,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_google_images, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_max_images_analyzed, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_research_instagram_posts, atlas_source_tier_ceiling, atlas_source_overrides, atlas_google_reviews, atlas_website_crawl_max_pages, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -238,14 +239,15 @@ Deno.serve(async (req) => {
     ok: true,
     atlasSaveSnapshots: data.atlas_save_snapshots,
     atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
-    atlasResearchGoogleImages: data.atlas_research_google_images,
     atlasResearchInstagramPosts: data.atlas_research_instagram_posts,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasGoogleReviews: data.atlas_google_reviews,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
     atlasImageVisionEnabled: data.atlas_image_vision_enabled,
-    atlasMaxImagesAnalyzed: data.atlas_max_images_analyzed,
+    atlasAnalyzeGoogleImages: data.atlas_analyze_google_images,
+    atlasAnalyzeWebsiteImages: data.atlas_analyze_website_images,
+    atlasAnalyzeInstagramImages: data.atlas_analyze_instagram_images,
     atlasSynthesisQuality: data.atlas_synthesis_quality,
     atlasPerRunCostCapUsd: data.atlas_per_run_cost_cap_usd,
     updatedAt: data.updated_at,
