@@ -14,6 +14,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json } from "../_shared/http.ts";
 import { isOnDomain } from "../_shared/onboarding.ts";
 import { invokeArtificialCaller } from "../_shared/internal.ts";
+import { classifyLinks } from "../_shared/channels.ts";
+import { firecrawlScrape } from "../_shared/firecrawl.ts";
 
 const GOOGLE_FIELD_MASK = [
   "id",
@@ -746,144 +748,6 @@ function isSocialUrl(u: string | undefined): boolean {
   }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Channel classification
-// ───────────────────────────────────────────────────────────────────────────
-
-type ChannelKey =
-  | "website_url"
-  | "instagram_url"
-  | "facebook_url"
-  | "tiktok_url"
-  | "x_url"
-  | "youtube_url"
-  | "threads_url"
-  | "reddit_url"
-  | "whatsapp_url"
-  | "opentable_url"
-  | "resy_url"
-  | "uber_eats_url"
-  | "rappi_url"
-  | "didi_food_url"
-  | "tripadvisor_url"
-  | "google_maps_url";
-
-type Channels = Record<ChannelKey, string | null>;
-
-// Hostname → channel column. The matcher accepts both exact hostnames and
-// subdomain matches (`m.facebook.com` resolves to `facebook_url`). The
-// `tripadvisor` and `didi` rules are intentionally loose because the TLD
-// varies by country (`.com`, `.com.mx`, `.es`, `.com.ar`).
-function matchChannel(host: string): ChannelKey | null {
-  const h = host.replace(/^www\./, "").toLowerCase();
-  if (h === "instagram.com" || h.endsWith(".instagram.com")) return "instagram_url";
-  if (h === "facebook.com" || h.endsWith(".facebook.com")) return "facebook_url";
-  if (h === "fb.com" || h.endsWith(".fb.com")) return "facebook_url";
-  if (h === "tiktok.com" || h.endsWith(".tiktok.com")) return "tiktok_url";
-  if (h === "twitter.com" || h.endsWith(".twitter.com")) return "x_url";
-  if (h === "x.com" || h.endsWith(".x.com")) return "x_url";
-  if (h === "youtube.com" || h.endsWith(".youtube.com")) return "youtube_url";
-  if (h === "youtu.be") return "youtube_url";
-  if (h === "threads.net" || h.endsWith(".threads.net")) return "threads_url";
-  if (h === "threads.com" || h.endsWith(".threads.com")) return "threads_url";
-  if (h === "reddit.com" || h.endsWith(".reddit.com")) return "reddit_url";
-  if (h === "wa.me" || h.endsWith(".wa.me")) return "whatsapp_url";
-  if (h === "whatsapp.com" || h.endsWith(".whatsapp.com")) return "whatsapp_url";
-  if (h.startsWith("opentable.")) return "opentable_url";
-  if (h === "resy.com" || h.endsWith(".resy.com")) return "resy_url";
-  if (h === "ubereats.com" || h.endsWith(".ubereats.com")) return "uber_eats_url";
-  if (h === "rappi.com" || h.endsWith(".rappi.com")) return "rappi_url";
-  if (h.startsWith("rappi.com.")) return "rappi_url";
-  if (h === "didi.com" || h.endsWith(".didi.com")) return "didi_food_url";
-  if (h.startsWith("didifood.")) return "didi_food_url";
-  if (h === "sindelantal.com.mx" || h.endsWith(".sindelantal.com.mx")) return "didi_food_url";
-  if (h.startsWith("tripadvisor.")) return "tripadvisor_url";
-  if (h === "google.com/maps" || h === "maps.google.com" || h.endsWith(".google.com/maps"))
-    return "google_maps_url";
-  if (h === "maps.app.goo.gl" || h === "goo.gl") return "google_maps_url";
-  return null;
-}
-
-// Trim tracking junk + trailing slashes so two near-identical links from
-// the same host collapse to one before we pick the shortest.
-function canonicaliseUrl(raw: string): string | null {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-    // Strip noisy query params; keep anything that looks meaningful.
-    const drop = ["ref", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid"];
-    drop.forEach((k) => u.searchParams.delete(k));
-    // Drop fragment — never identifies a profile root.
-    u.hash = "";
-    // Drop trailing slash on pathname so /casaluminar/ ≡ /casaluminar.
-    if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
-      u.pathname = u.pathname.slice(0, -1);
-    }
-    return u.toString();
-  } catch {
-    return null;
-  }
-}
-
-function classifyLinks(input: (string | null | undefined)[]): Channels {
-  const buckets: Partial<Record<ChannelKey, string[]>> = {};
-  // The non-social website also needs a home — googleMapsUri / websiteUri
-  // come in here too. We treat anything classified as `google_maps_url` /
-  // `instagram_url` / etc. through matchChannel, and anything that isn't
-  // a known channel host but DOES look like a real website gets to fight
-  // for the `website_url` slot.
-  const websiteCandidates: string[] = [];
-
-  for (const raw of input) {
-    if (!raw) continue;
-    const url = canonicaliseUrl(raw);
-    if (!url) continue;
-    let host: string;
-    try {
-      host = new URL(url).hostname;
-    } catch {
-      continue;
-    }
-    const channel = matchChannel(host);
-    if (channel) {
-      (buckets[channel] ??= []).push(url);
-    } else {
-      websiteCandidates.push(url);
-    }
-  }
-
-  // Pick the shortest URL per channel — heuristic for "profile root over
-  // deep link". Ties are broken by the first occurrence (which preserves
-  // Google-provided URIs over Firecrawl-scraped ones).
-  const pickShortest = (arr: string[] | undefined): string | null => {
-    if (!arr || arr.length === 0) return null;
-    let best = arr[0];
-    for (const v of arr) {
-      if (v.length < best.length) best = v;
-    }
-    return best;
-  };
-
-  const result: Channels = {
-    website_url: pickShortest(websiteCandidates),
-    instagram_url: pickShortest(buckets.instagram_url),
-    facebook_url: pickShortest(buckets.facebook_url),
-    tiktok_url: pickShortest(buckets.tiktok_url),
-    x_url: pickShortest(buckets.x_url),
-    youtube_url: pickShortest(buckets.youtube_url),
-    threads_url: pickShortest(buckets.threads_url),
-    reddit_url: pickShortest(buckets.reddit_url),
-    whatsapp_url: pickShortest(buckets.whatsapp_url),
-    opentable_url: pickShortest(buckets.opentable_url),
-    resy_url: pickShortest(buckets.resy_url),
-    uber_eats_url: pickShortest(buckets.uber_eats_url),
-    rappi_url: pickShortest(buckets.rappi_url),
-    didi_food_url: pickShortest(buckets.didi_food_url),
-    tripadvisor_url: pickShortest(buckets.tripadvisor_url),
-    google_maps_url: pickShortest(buckets.google_maps_url),
-  };
-  return result;
-}
 
 // Score-and-pick over every email in the Firecrawl markdown.
 //
@@ -989,44 +853,20 @@ async function fetchFirecrawl(
 ): Promise<{ markdown: string; links: string[] } | null> {
   if (!websiteUri || !apiKey) return null;
   if (isSocialUrl(websiteUri)) return null;
-  try {
-    const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: websiteUri,
-        formats: ["markdown", "links"],
-        // Keep footer + header chrome. Venue contact details (email,
-        // phone, social) almost always live in the footer, and
-        // onlyMainContent strips it. Firecrawl bills per page, not per
-        // byte, so this is free.
-        onlyMainContent: false,
-        // Drop nav-only chrome that crowds out real signal but isn't
-        // valuable here.
-        excludeTags: ["nav"],
-        timeout: 20000,
-      }),
-    });
-    if (!r.ok) return null;
-    const d = (await r.json()) as {
-      data?: { markdown?: string; links?: string[] };
-    };
-    return {
-      // Bigger budget: footers add a few KB; we want them in the
-      // email regex pass and the OpenAI synthesis context. gpt-4o-mini
-      // happily eats 16k chars at $0.15/M tokens.
-      markdown: (d.data?.markdown ?? "").slice(0, 16000),
-      // More links too — social icons usually live in the footer, so
-      // classifyLinks now catches IG/FB/X profiles we previously
-      // missed when scraping main-content-only.
-      links: (d.data?.links ?? []).slice(0, 40),
-    };
-  } catch {
-    return null;
-  }
+  // Keep footer + header chrome (onlyMainContent:false): venue contact details
+  // (email, phone, social icons) almost always live in the footer. Firecrawl
+  // bills per page, so the extra bytes are free.
+  const scraped = await firecrawlScrape(apiKey, websiteUri, {
+    formats: ["markdown", "links"],
+    onlyMainContent: false,
+    excludeTags: ["nav"],
+    timeout: 20000,
+  });
+  if (!scraped) return null;
+  return {
+    markdown: scraped.markdown.slice(0, 16000),
+    links: scraped.links.slice(0, 40),
+  };
 }
 
 // Best-effort scrape of an Instagram profile page to extract follower
@@ -1043,26 +883,13 @@ async function fetchInstagramFollowers(
   apiKey: string | undefined,
 ): Promise<number | null> {
   if (!igUrl || !apiKey) return null;
-  try {
-    const r = await fetch("https://api.firecrawl.dev/v1/scrape", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        url: igUrl,
-        formats: ["markdown"],
-        onlyMainContent: false,
-        timeout: 15000,
-      }),
-    });
-    if (!r.ok) return null;
-    const d = (await r.json()) as { data?: { markdown?: string } };
-    return parseInstagramFollowers(d.data?.markdown ?? "");
-  } catch {
-    return null;
-  }
+  const scraped = await firecrawlScrape(apiKey, igUrl, {
+    formats: ["markdown"],
+    onlyMainContent: false,
+    timeout: 15000,
+  });
+  if (!scraped) return null;
+  return parseInstagramFollowers(scraped.markdown);
 }
 
 // Pulls a follower count out of an Instagram profile markdown dump. The
