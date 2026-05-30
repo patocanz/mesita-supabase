@@ -281,6 +281,8 @@ Deno.serve(async (req) => {
   const gatherGoogleImages = num(cfg?.atlas_gather_google_images, 10);
   const gatherWebsiteImages = num(cfg?.atlas_gather_website_images, 10);
   const gatherInstagramPosts = num(cfg?.atlas_gather_instagram_posts, 10);
+  // How many website pages to crawl for images (homepage + internal links).
+  const websiteCrawlMaxPages = Math.max(1, num(cfg?.atlas_website_crawl_max_pages, 5));
   // SAVE cap — final count persisted to the venue, SOURCE-INDEPENDENT, applied
   // after analyze + rubric sort.
   const saveTotalImages = num(cfg?.atlas_save_total_images, 20);
@@ -450,7 +452,8 @@ Deno.serve(async (req) => {
     !reuseIg && socialLayer && !!APIFY_KEY && !!igHandle &&
     reserve("apify_instagram", COST.instagram + COST.instagramVerify);
   const runWebsite =
-    !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite && reserve("firecrawl", COST.firecrawl);
+    !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite &&
+    reserve("firecrawl", COST.firecrawl * websiteCrawlMaxPages + COST.sort);
   const maxVisionImages = visionEnabled
     ? analyzeGoogleImages + analyzeWebsiteImages + analyzeInstagramImages
     : 0;
@@ -675,29 +678,58 @@ Deno.serve(async (req) => {
       }
     })(),
     // Firecrawl → website markdown (menu grounding) + website IMAGES.
+    // Crawl up to N pages (homepage + internal links), collect EVERY <img>
+    // with its alt/dimensions/page context, then ask an LLM to rank them
+    // hero-first (square dimensions prioritised; logos/icons/sprites dropped),
+    // and keep the gather cap.
     (async () => {
       if (!runWebsite) return;
       try {
-        const scraped = await firecrawlScrape(FIRECRAWL_KEY, resolvedWebsite!, {
-          formats: ["markdown"],
-          onlyMainContent: true,
+        const home = await firecrawlScrape(FIRECRAWL_KEY, resolvedWebsite!, {
+          formats: ["markdown", "html", "links"],
+          onlyMainContent: false,
         });
-        if (scraped) {
-          siteMarkdown = scraped.markdown.slice(0, 6000);
-          // Extract a generous candidate pool, then metadata-sort by image
-          // SIZE (largest file first ≈ highest-res hero shots) and take the
-          // gather cap.
-          const pool = extractWebsiteImages(
-            scraped.markdown,
-            scraped.metadata.ogImage as string | undefined,
-            resolvedWebsite!,
-            30,
-          );
-          websiteImages = (await sizeRankImages(pool)).slice(0, gatherWebsiteImages);
-          sources.firecrawl = { ok: !!siteMarkdown, images: websiteImages.length };
-        } else {
+        if (!home) {
           sources.firecrawl = { ok: false };
+          return;
         }
+        siteMarkdown = home.markdown.slice(0, 6000);
+
+        const candidates: WebImage[] = [];
+        const seen = new Set<string>();
+        const collect = (imgs: WebImage[]) => {
+          for (const img of imgs) {
+            if (!seen.has(img.url) && candidates.length < 60) {
+              seen.add(img.url);
+              candidates.push(img);
+            }
+          }
+        };
+        const og = home.metadata.ogImage;
+        if (typeof og === "string") collect([{ url: og, alt: "og:image", page: "home" }]);
+        collect(extractImagesFromHtml(home.html ?? "", resolvedWebsite!, "home"));
+
+        // Follow up to (N-1) same-domain internal pages, scraped in parallel.
+        const extraPages = pickInternalPages(home.links, resolvedWebsite!, websiteCrawlMaxPages - 1);
+        if (extraPages.length > 0) {
+          const scrapes = await Promise.all(
+            extraPages.map((p) =>
+              firecrawlScrape(FIRECRAWL_KEY, p, { formats: ["html"], onlyMainContent: false }),
+            ),
+          );
+          scrapes.forEach((s, i) => {
+            if (s) collect(extractImagesFromHtml(s.html ?? "", extraPages[i], `p${i + 1}`));
+          });
+        }
+
+        const ranked = await rankWebsiteImagesByRelevance(OPENAI_KEY, candidates);
+        websiteImages = ranked.slice(0, gatherWebsiteImages);
+        sources.firecrawl = {
+          ok: !!siteMarkdown,
+          pages: 1 + extraPages.length,
+          candidates: candidates.length,
+          images: websiteImages.length,
+        };
       } catch {
         sources.firecrawl = { ok: false };
       }
@@ -983,63 +1015,165 @@ Deno.serve(async (req) => {
 
 // ── Image funnel helpers ────────────────────────────────────────────────────
 
-// Pull image URLs out of scraped website content: markdown image syntax
-// ![alt](url) + the og:image. Resolved against the site origin and capped.
-function extractWebsiteImages(
-  markdown: string,
-  ogImage: string | undefined,
-  baseUrl: string,
-  cap: number,
-): string[] {
-  const out: string[] = [];
+type WebImage = {
+  url: string;
+  alt: string;
+  width?: number;
+  height?: number;
+  page: string;
+};
+
+// Pull every <img> out of a page's HTML with its alt + dimensions, resolved
+// against the page URL. Skips data:/.svg (icons) and obvious tiny assets;
+// dimensions come from width/height attrs, falling back to a WxH pattern in
+// the URL. The LLM ranker does the real relevance filtering.
+function extractImagesFromHtml(html: string, baseUrl: string, page: string): WebImage[] {
+  if (!html) return [];
+  const out: WebImage[] = [];
   const seen = new Set<string>();
-  const add = (u: string | undefined) => {
-    if (!u || out.length >= cap) return;
-    let abs = u.trim();
-    try {
-      abs = new URL(abs, baseUrl).toString();
-    } catch {
-      return;
-    }
-    if (!/^https?:\/\//i.test(abs)) return;
-    if (!/\.(jpe?g|png|webp|avif)(\?|$)/i.test(abs)) return;
-    if (seen.has(abs)) return;
-    seen.add(abs);
-    out.push(abs);
-  };
-  add(ogImage);
-  const re = /!\[[^\]]*\]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/gi;
+  const tagRe = /<img\b[^>]*>/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(markdown)) && out.length < cap) add(m[1]);
+  while ((m = tagRe.exec(html)) !== null && out.length < 40) {
+    const tag = m[0];
+    const srcRaw =
+      /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ??
+      /\bdata-src\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ??
+      /\bsrcset\s*=\s*["']([^"',\s]+)/i.exec(tag)?.[1];
+    if (!srcRaw) continue;
+    let url: string;
+    try {
+      url = new URL(srcRaw.trim(), baseUrl).toString();
+    } catch {
+      continue;
+    }
+    if (!/^https?:\/\//i.test(url)) continue;
+    if (/\.svg(\?|$)/i.test(url)) continue;
+    if (seen.has(url)) continue;
+    const alt = /\balt\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1]?.trim() ?? "";
+    let width = toInt(/\bwidth\s*=\s*["']?(\d+)/i.exec(tag)?.[1]);
+    let height = toInt(/\bheight\s*=\s*["']?(\d+)/i.exec(tag)?.[1]);
+    if (width == null || height == null) {
+      const dim = /(\d{2,4})x(\d{2,4})/.exec(url);
+      if (dim) {
+        width = width ?? Number(dim[1]);
+        height = height ?? Number(dim[2]);
+      }
+    }
+    // Drop tiny assets (icons, spacers, tracking pixels) when dims say so.
+    if (width != null && height != null && (width < 60 || height < 60)) continue;
+    seen.add(url);
+    out.push({ url, alt, width: width ?? undefined, height: height ?? undefined, page });
+  }
   return out;
 }
 
-// Metadata sort for website images = by file SIZE, largest first (a decent
-// proxy for "the high-res hero shots, not tracking pixels / icons"). HEADs each
-// URL for Content-Length in parallel; URLs that don't answer keep their
-// original (markdown) order behind the sized ones. Best-effort.
-async function sizeRankImages(urls: string[]): Promise<string[]> {
-  if (urls.length <= 1) return urls;
-  const sized = await Promise.all(
-    urls.map(async (url, i) => {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8000);
-      try {
-        const r = await fetch(url, { method: "HEAD", signal: ctrl.signal });
-        const len = Number(r.headers.get("content-length") ?? "");
-        return { url, i, size: Number.isFinite(len) ? len : -1 };
-      } catch {
-        return { url, i, size: -1 };
-      } finally {
-        clearTimeout(timer);
+function toInt(v: string | undefined): number | null {
+  if (!v) return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Choose up to `max` same-domain internal pages worth scraping for images,
+// prioritising venue-relevant sections (gallery / menu / about / rooms…).
+function pickInternalPages(links: string[], baseUrl: string, max: number): string[] {
+  if (max <= 0) return [];
+  let baseHost: string, basePath: string;
+  try {
+    const b = new URL(baseUrl);
+    baseHost = b.hostname.replace(/^www\./, "");
+    basePath = b.pathname.replace(/\/$/, "");
+  } catch {
+    return [];
+  }
+  const PRIORITY = /(galer|gallery|photo|foto|menu|carta|about|nosotros|space|salon|room|habitac|event|food|comida|drink|bar|restaurant)/i;
+  const seen = new Set<string>();
+  const scored: { url: string; score: number }[] = [];
+  for (const raw of links) {
+    let u: URL;
+    try {
+      u = new URL(raw, baseUrl);
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if (u.hostname.replace(/^www\./, "") !== baseHost) continue;
+    const path = u.pathname.replace(/\/$/, "");
+    if (!path || path === basePath) continue;
+    if (/\.(pdf|jpe?g|png|webp|gif|svg|zip|docx?|mp4)$/i.test(path)) continue;
+    const key = path.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    scored.push({ url: `${u.origin}${path}`, score: PRIORITY.test(path) ? 1 : 0 });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, max).map((s) => s.url);
+}
+
+// Ask a text LLM to rank the website's images hero-first. It only sees the
+// metadata (filename, alt, dimensions, page) — no images are sent — so it's
+// cheap. Square dimensions are prioritised; logos / icons / payment badges /
+// social glyphs / tracking pixels are dropped to the bottom. Best-effort:
+// on any failure the candidates keep their original (DOM) order.
+async function rankWebsiteImagesByRelevance(
+  openaiKey: string | undefined,
+  images: WebImage[],
+): Promise<string[]> {
+  if (images.length <= 1 || !openaiKey) return images.map((i) => i.url);
+  const list = images
+    .map((img, i) => {
+      const file = img.url.split("/").pop()?.split("?")[0] ?? img.url;
+      const dims = img.width && img.height ? `${img.width}x${img.height}` : "unknown";
+      return `${i}: file="${file}" alt="${img.alt.slice(0, 80)}" dims=${dims} page=${img.page}`;
+    })
+    .join("\n");
+  const user =
+    `These are all the images found on a venue's website (filename, alt text, ` +
+    `dimensions, page). Rank them from MOST likely to be a hero / representative ` +
+    `venue photo (the space, interior, exterior, food, ambiance) to LEAST. ` +
+    `PRIORITISE roughly SQUARE dimensions when known. ALWAYS rank LAST anything ` +
+    `whose filename or alt contains logo / icon / favicon / badge / sprite / ` +
+    `pixel / avatar, plus payment-method glyphs, social glyphs, and heavily ` +
+    `text-laden banners.\n\n${list}\n\n` +
+    `Return a SINGLE JSON object {"order": [indices best-to-worst]} including ` +
+    `every index exactly once. No prose.`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    let r: Response;
+    try {
+      r = await fetch(OPENAI_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model: VISION_MODEL,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [{ role: "user", content: user }],
+        }),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) return images.map((i) => i.url);
+    const data = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+    const raw = (safeParseJson(data.choices?.[0]?.message?.content ?? "") as { order?: unknown })
+      ?.order;
+    if (!Array.isArray(raw)) return images.map((i) => i.url);
+    const order: number[] = [];
+    const seen = new Set<number>();
+    for (const v of raw) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (Number.isInteger(n) && n >= 0 && n < images.length && !seen.has(n)) {
+        order.push(n);
+        seen.add(n);
       }
-    }),
-  );
-  sized.sort((a, b) => {
-    if (b.size !== a.size) return b.size - a.size; // larger first; unknown (-1) last
-    return a.i - b.i; // stable on original order
-  });
-  return sized.map((s) => s.url);
+    }
+    for (let i = 0; i < images.length; i++) if (!seen.has(i)) order.push(i);
+    return order.map((i) => images[i].url);
+  } catch {
+    return images.map((i) => i.url);
+  }
 }
 
 // Vision pass: describe each image with the admin analysis prompt. ONE call

@@ -19,6 +19,7 @@ export type FirecrawlScrapeOpts = {
 
 export type FirecrawlScrape = {
   markdown: string;
+  html: string;
   links: string[];
   metadata: Record<string, unknown>;
 };
@@ -49,10 +50,16 @@ export async function firecrawlScrape(
     });
     if (!r.ok) return null;
     const d = (await r.json()) as {
-      data?: { markdown?: string; links?: string[]; metadata?: Record<string, unknown> };
+      data?: {
+        markdown?: string;
+        html?: string;
+        links?: string[];
+        metadata?: Record<string, unknown>;
+      };
     };
     return {
       markdown: d.data?.markdown ?? "",
+      html: d.data?.html ?? "",
       links: Array.isArray(d.data?.links) ? (d.data!.links as string[]) : [],
       metadata: d.data?.metadata ?? {},
     };
