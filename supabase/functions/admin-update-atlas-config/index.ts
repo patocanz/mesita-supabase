@@ -219,9 +219,9 @@ Deno.serve(async (req) => {
   }
 
   if (body.analyzeInstagramImages !== undefined) {
-    const n = intInRange(body.analyzeInstagramImages, 0, 10);
+    const n = intInRange(body.analyzeInstagramImages, 0, 20);
     if (n === null) {
-      return json({ ok: false, error: "analyzeInstagramImages must be an integer 0-10" }, 400);
+      return json({ ok: false, error: "analyzeInstagramImages must be an integer 0-20" }, 400);
     }
     patch.atlas_analyze_instagram_images = n;
   }
