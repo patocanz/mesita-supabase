@@ -38,11 +38,18 @@ import {
   instagramHandleFromUrl,
   runApifyActor,
 } from "../_shared/apify.ts";
+import { firecrawlScrape, firecrawlSearch } from "../_shared/firecrawl.ts";
+import {
+  domainOf,
+  facebookPageFromUrl,
+  pickFacebook,
+  pickInstagram,
+  pickWebsite,
+  validHost,
+} from "../_shared/channels.ts";
 
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
 const PERPLEXITY_MODEL = "sonar";
-const FIRECRAWL_URL = "https://api.firecrawl.dev/v1/scrape";
-const FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v1/search";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
 // Vision + sort always run on the cheap multimodal model — image work doesn't
@@ -668,36 +675,25 @@ Deno.serve(async (req) => {
     (async () => {
       if (!runWebsite) return;
       try {
-        const r = await fetch(FIRECRAWL_URL, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${FIRECRAWL_KEY!}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            url: resolvedWebsite,
-            formats: ["markdown"],
-            onlyMainContent: true,
-          }),
+        const scraped = await firecrawlScrape(FIRECRAWL_KEY, resolvedWebsite!, {
+          formats: ["markdown"],
+          onlyMainContent: true,
         });
-        if (r.ok) {
-          const data = (await r.json()) as {
-            data?: { markdown?: string; metadata?: { ogImage?: string } };
-          };
-          siteMarkdown = (data.data?.markdown ?? "").slice(0, 6000);
+        if (scraped) {
+          siteMarkdown = scraped.markdown.slice(0, 6000);
           // Extract a generous candidate pool, then metadata-sort by image
           // SIZE (largest file first ≈ highest-res hero shots) and take the
           // gather cap.
           const pool = extractWebsiteImages(
-            data.data?.markdown ?? "",
-            data.data?.metadata?.ogImage,
+            scraped.markdown,
+            scraped.metadata.ogImage as string | undefined,
             resolvedWebsite!,
             30,
           );
           websiteImages = (await sizeRankImages(pool)).slice(0, gatherWebsiteImages);
           sources.firecrawl = { ok: !!siteMarkdown, images: websiteImages.length };
         } else {
-          sources.firecrawl = { ok: false, status: r.status };
+          sources.firecrawl = { ok: false };
         }
       } catch {
         sources.firecrawl = { ok: false };
@@ -1352,133 +1348,6 @@ async function resolveChannels(opts: {
   return { instagram_url: instagram, facebook_url: facebook, website_url: website, via };
 }
 
-// Web search via Firecrawl. Returns the result URLs (best-first). Best-effort.
-async function firecrawlSearch(
-  key: string,
-  query: string,
-  limit = 8,
-): Promise<string[]> {
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 20000);
-    let r: Response;
-    try {
-      r = await fetch(FIRECRAWL_SEARCH_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ query, limit }),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!r.ok) return [];
-    const d = (await r.json()) as { data?: unknown[]; results?: unknown[] };
-    const arr = Array.isArray(d.data) ? d.data : Array.isArray(d.results) ? d.results : [];
-    return arr
-      .map((x) => (x && typeof (x as { url?: unknown }).url === "string" ? (x as { url: string }).url : ""))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-// First search result that resolves to a real Instagram profile (skips
-// /p/, /reel/, /explore/ etc. via instagramHandleFromUrl) → canonical URL.
-function pickInstagram(urls: string[]): string | null {
-  for (const u of urls) {
-    const handle = instagramHandleFromUrl(u);
-    if (handle) return `https://www.instagram.com/${handle}`;
-  }
-  return null;
-}
-
-// First search result that resolves to a real Facebook page (skips photo.php,
-// /watch, /events, etc.) → canonical URL.
-function pickFacebook(urls: string[]): string | null {
-  for (const u of urls) {
-    const page = facebookPageFromUrl(u);
-    if (page) return page;
-  }
-  return null;
-}
-
-// First search result that's a plausible official website: an http(s) URL
-// whose host isn't a social network, directory, or aggregator.
-function pickWebsite(urls: string[]): string | null {
-  const blocked = [
-    "instagram.com",
-    "facebook.com",
-    "fb.com",
-    "tiktok.com",
-    "twitter.com",
-    "x.com",
-    "youtube.com",
-    "youtu.be",
-    "google.com",
-    "goo.gl",
-    "maps.app.goo.gl",
-    "tripadvisor.com",
-    "tripadvisor.com.mx",
-    "yelp.com",
-    "foursquare.com",
-    "opentable.com",
-    "opentable.com.mx",
-    "wikipedia.org",
-    "linktr.ee",
-    "linkedin.com",
-    "threads.net",
-    "wa.me",
-    "menudo.app",
-  ];
-  for (const u of urls) {
-    const valid = validHost(u, null);
-    if (!valid) continue;
-    try {
-      const h = new URL(valid).hostname.toLowerCase().replace(/^www\./, "");
-      if (blocked.some((b) => h === b || h.endsWith(`.${b}`))) continue;
-      return valid;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-// Extract a venue's canonical Facebook page URL from any FB link, rejecting
-// non-page paths (photos, videos, events, share/login). profile.php?id= pages
-// are kept (legacy page form).
-function facebookPageFromUrl(url: string | null | undefined): string | null {
-  if (!url) return null;
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return null;
-  }
-  const host = u.hostname
-    .toLowerCase()
-    .replace(/^www\./, "")
-    .replace(/^m\./, "")
-    .replace(/^[a-z]{2}-[a-z]{2}\./, "");
-  if (!(host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.com")) {
-    return null;
-  }
-  const seg = u.pathname.split("/").filter(Boolean)[0]?.toLowerCase();
-  if (!seg) return null;
-  if (seg === "profile.php") {
-    const id = u.searchParams.get("id");
-    return id && /^\d+$/.test(id) ? `https://www.facebook.com/profile.php?id=${id}` : null;
-  }
-  const reserved = new Set([
-    "photo.php", "photo", "photos", "watch", "events", "event", "videos", "video",
-    "reel", "reels", "story.php", "stories", "sharer", "sharer.php", "login",
-    "pages", "groups", "marketplace", "media", "people", "help", "policies",
-    "permalink.php", "search", "hashtag", "p",
-  ]);
-  if (reserved.has(seg)) return null;
-  return `https://www.facebook.com/${u.pathname.split("/").filter(Boolean)[0]}`;
-}
 
 // Perplexity fallback: resolve channel URLs from search. An LLM, so every URL
 // it returns is host-validated before we trust it.
@@ -1539,32 +1408,6 @@ async function discoverChannelsPerplexity(
   }
 }
 
-function validHost(v: unknown, allowed: string[] | null): string | null {
-  if (typeof v !== "string" || !v) return null;
-  let u: URL;
-  try {
-    u = new URL(v);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-  const h = u.hostname.toLowerCase().replace(/^www\./, "");
-  if (allowed) {
-    const match = allowed.some((a) => h === a || h.endsWith(`.${a}`));
-    if (!match) return null;
-    if (u.pathname === "/" || u.pathname === "") return null;
-  }
-  return u.toString();
-}
-
-function domainOf(url: string | null | undefined): string | null {
-  if (!url || typeof url !== "string") return null;
-  try {
-    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return null;
-  }
-}
 
 // Does this scraped Instagram profile belong to THIS venue? Generic names
 // ("Metropolitan Club") make the searched candidate unreliable, so we confirm
