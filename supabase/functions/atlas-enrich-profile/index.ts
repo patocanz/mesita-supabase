@@ -633,9 +633,10 @@ Deno.serve(async (req) => {
           ? (p.latestPosts as Record<string, unknown>[])
           : [];
         instagramImages = posts
+          // Videos are kept: their `displayUrl` is the cover frame, so we
+          // analyze it as a photo rather than dropping the post.
           .filter(
             (po) =>
-              po.type !== "Video" &&
               typeof po.displayUrl === "string" &&
               (po.displayUrl as string).startsWith("http"),
           )
