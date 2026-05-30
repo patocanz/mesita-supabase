@@ -83,6 +83,9 @@ const IMAGE_BUCKET = "venue-images";
 const COST = {
   compass: 0.05, // Apify Google Maps (reviews + images)
   instagram: 0.02, // Apify IG profile scraper
+  // Identity verification of the IG candidate: the LLM judge plus, worst case,
+  // a Perplexity fallback + a second IG scrape. Bundled into the IG reservation.
+  instagramVerify: 0.04,
   facebook: 0.02, // Apify FB pages scraper
   firecrawl: 0.01, // Firecrawl scrape
   perplexity: 0.01, // Perplexity sonar / Serper
@@ -295,7 +298,7 @@ Deno.serve(async (req) => {
   const sources: Record<string, unknown> = {};
   const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
 
-  // ── Cost cap (Phase 4) ───────────────────────────────────────────────────
+  // ── Cost cap ────────────────────────────────────────────────────────────────
   // Reserve budget BEFORE running each step, in priority order. A step that
   // doesn't fit the remaining budget is disabled (skipped) — so the run never
   // exceeds the per-run USD cap. Reused-from-snapshot steps cost nothing.
@@ -308,7 +311,7 @@ Deno.serve(async (req) => {
     return true;
   };
 
-  // ── Snapshot pre-read (Phase 4) ──────────────────────────────────────────
+  // ── Snapshot pre-read ───────────────────────────────────────────────────────
   // Read the venue's latest snapshot; when it's fresh, reuse its gathered
   // material and skip the matching external fetch — "only fetch the gaps".
   let prior: Gathered | null = null;
@@ -434,7 +437,8 @@ Deno.serve(async (req) => {
   const runReviews =
     !reuseGoogle && !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
   const runInstagram =
-    !reuseIg && socialLayer && !!APIFY_KEY && !!igHandle && reserve("apify_instagram", COST.instagram);
+    !reuseIg && socialLayer && !!APIFY_KEY && !!igHandle &&
+    reserve("apify_instagram", COST.instagram + COST.instagramVerify);
   const runWebsite =
     !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite && reserve("firecrawl", COST.firecrawl);
   const maxVisionImages = visionEnabled
@@ -924,7 +928,7 @@ Deno.serve(async (req) => {
   };
   update.enrichment_sources = sources;
 
-  // ── Snapshot save (Phase 4) ──────────────────────────────────────────────
+  // ── Snapshot save ───────────────────────────────────────────────────────────
   // Append-only: every run writes a fresh snapshot of the gathered material so
   // the next pre-read can skip the gaps. Best-effort — never fails the enrich.
   if (saveSnapshots) {
@@ -1189,10 +1193,7 @@ async function saveSnapshot(
   payload: unknown,
 ): Promise<boolean> {
   try {
-    // Idempotent ensure — createBucket errors when it already exists; ignore.
-    await admin.storage
-      .createBucket(SNAPSHOT_BUCKET, { public: false })
-      .catch(() => {});
+    // Bucket is provisioned by migration 0056 — no per-run create needed.
     const name = `${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
     const { error } = await admin.storage
       .from(SNAPSHOT_BUCKET)
@@ -1218,8 +1219,8 @@ async function mirrorImages(
   prefix: string,
 ): Promise<string[]> {
   if (urls.length === 0) return urls;
+  // Bucket is provisioned by migration 0057 — no per-run create needed.
   const publicPath = `/storage/v1/object/public/${IMAGE_BUCKET}/`;
-  await admin.storage.createBucket(IMAGE_BUCKET, { public: true }).catch(() => {});
   return await Promise.all(
     urls.map(async (url, i) => {
       if (typeof url !== "string" || !url) return url;
@@ -1294,28 +1295,29 @@ async function resolveChannels(opts: {
 
   // 2. Firecrawl Search — one targeted query per missing channel.
   if (opts.firecrawlKey) {
+    const key = opts.firecrawlKey;
+    const search = (term: string) => firecrawlSearch(key, `${opts.name}${cityPart} ${term}`);
+    const [igHits, fbHits, webHits] = await Promise.all([
+      instagram ? Promise.resolve<string[]>([]) : search("instagram"),
+      facebook ? Promise.resolve<string[]>([]) : search("facebook"),
+      website ? Promise.resolve<string[]>([]) : search("official website"),
+    ]);
     if (!instagram) {
-      const hit = pickInstagram(
-        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} instagram`),
-      );
+      const hit = pickInstagram(igHits);
       if (hit) {
         instagram = hit;
         via.instagram = "firecrawl";
       }
     }
     if (!facebook) {
-      const hit = pickFacebook(
-        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} facebook`),
-      );
+      const hit = pickFacebook(fbHits);
       if (hit) {
         facebook = hit;
         via.facebook = "firecrawl";
       }
     }
     if (!website) {
-      const hit = pickWebsite(
-        await firecrawlSearch(opts.firecrawlKey, `${opts.name}${cityPart} official website`),
-      );
+      const hit = pickWebsite(webHits);
       if (hit) {
         website = hit;
         via.website = "firecrawl";
@@ -1591,10 +1593,13 @@ async function igProfileMatchesVenue(
   if (wd && links.some((l) => domainOf(l) === wd)) return true;
 
   if (!openaiKey) return false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
   try {
     const r = await fetch(OPENAI_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${openaiKey}`, "Content-Type": "application/json" },
+      signal: ctrl.signal,
       body: JSON.stringify({
         model: VISION_MODEL,
         temperature: 0,
@@ -1626,6 +1631,8 @@ async function igProfileMatchesVenue(
     return obj?.match === true;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
