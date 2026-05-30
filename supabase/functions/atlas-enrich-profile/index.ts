@@ -49,7 +49,10 @@ import {
 } from "../_shared/channels.ts";
 
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
-const PERPLEXITY_MODEL = "sonar";
+// sonar-pro searches harder than base sonar (which returns null too often on
+// venues whose socials clearly exist). Perplexity is the FALLBACK candidate
+// source — Firecrawl Search runs first.
+const PERPLEXITY_MODEL = "sonar-pro";
 const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 
 // Vision + sort always run on the cheap multimodal model — image work doesn't
@@ -1361,10 +1364,12 @@ async function discoverChannelsPerplexity(
     `Find the official online presence of the venue "${name}"` +
     (locationLine ? ` located at ${locationLine}` : "") +
     (category ? ` (category: ${category})` : "") +
-    `. Return strict JSON with the canonical URLs of its official Instagram ` +
-    `profile, Facebook page, and website. Only return a URL you can verify ` +
-    `from search results; use null when you are not confident. Never invent ` +
-    `or guess a URL.`;
+    `. Return strict JSON with the canonical URLs of its Instagram profile, ` +
+    `Facebook page, and website.\n` +
+    `- instagram_url: give your BEST candidate even if not fully certain ` +
+    `(it is independently verified afterwards). Only null if you truly find none.\n` +
+    `- facebook_url and website_url: only return a URL you are confident is THIS ` +
+    `exact venue's; use null when unsure. Never invent a URL.`;
   try {
     const r = await fetch(PERPLEXITY_URL, {
       method: "POST",
@@ -1378,7 +1383,7 @@ async function discoverChannelsPerplexity(
           {
             role: "system",
             content:
-              "You resolve a venue's official channel URLs from search. Output only valid JSON matching the schema. Prefer null over guessing. Never fabricate URLs.",
+              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For Instagram, propose your best candidate (it gets verified downstream); for Facebook and website, prefer null over a wrong guess. Never fabricate a URL out of thin air.",
           },
           { role: "user", content: prompt },
         ],
