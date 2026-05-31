@@ -385,10 +385,16 @@ Deno.serve(async (req) => {
       : COST.synthesisStandard;
   const runSynthesis = !!OPENAI_KEY && reserve("synthesis", synthCost);
 
+  // Re-run discovery whenever a channel is STILL missing after snapshot reuse.
+  // A prior run that failed to resolve IG/FB saves a snapshot whose discovery
+  // block has those fields null; gating on `!reuseDiscovery` would let that
+  // cached miss pin the venue to null for the whole reuse window (it would
+  // never retry Firecrawl/Perplexity). Instead, reuse fills the knowns above
+  // and discovery runs for the genuine gaps — its `have` already carries the
+  // reused values, so it only searches the channels that are still missing.
   const needsDiscovery =
     socialLayer &&
     (!!FIRECRAWL_KEY || !!PERPLEXITY_KEY) &&
-    !reuseDiscovery &&
     (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite);
   const runDiscovery = needsDiscovery && reserve("discovery", COST.perplexity);
 
@@ -1567,18 +1573,39 @@ async function discoverChannelsPerplexity(
     if (!r.ok) return null;
     const data = (await r.json()) as {
       choices?: { message?: { content?: string } }[];
+      citations?: unknown[];
+      search_results?: { url?: unknown }[];
     };
-    const parsed = safeParseJson(data.choices?.[0]?.message?.content ?? "") as
+    // sonar-pro answers on two channels: the JSON content (its considered
+    // answer) and the raw web hits it actually consulted (citations +
+    // search_results). The model is conservative and frequently returns null
+    // for a social profile it nonetheless surfaced in its sources — so when the
+    // JSON is empty we mine those hit URLs. pickInstagram/pickFacebook are
+    // host-locked to instagram.com/facebook.com, and the hits are specific to
+    // THIS venue's query, so a social URL among them is almost certainly the
+    // venue's. (Website is left JSON-only: a citation could be any news/blog
+    // domain that pickWebsite can't tell apart from the real site.)
+    const hitUrls: string[] = [];
+    for (const c of data.citations ?? []) {
+      if (typeof c === "string") hitUrls.push(c);
+    }
+    for (const s of data.search_results ?? []) {
+      if (s && typeof s.url === "string") hitUrls.push(s.url);
+    }
+    const answer = (safeParseJson(data.choices?.[0]?.message?.content ?? "") as
       | { instagram_url?: unknown; facebook_url?: unknown; website_url?: unknown }
-      | null;
-    if (!parsed) return null;
-    return {
-      instagram_url: pickInstagram([String(parsed.instagram_url ?? "")]) ??
-        validHost(parsed.instagram_url, ["instagram.com"]),
-      facebook_url: facebookPageFromUrl(String(parsed.facebook_url ?? "")) ??
-        validHost(parsed.facebook_url, ["facebook.com", "fb.com"]),
-      website_url: validHost(parsed.website_url, null),
-    };
+      | null) ?? {};
+    const instagram_url =
+      pickInstagram([String(answer.instagram_url ?? "")]) ??
+      validHost(answer.instagram_url, ["instagram.com"]) ??
+      pickInstagram(hitUrls);
+    const facebook_url =
+      facebookPageFromUrl(String(answer.facebook_url ?? "")) ??
+      validHost(answer.facebook_url, ["facebook.com", "fb.com"]) ??
+      pickFacebook(hitUrls);
+    const website_url = validHost(answer.website_url, null);
+    if (!instagram_url && !facebook_url && !website_url) return null;
+    return { instagram_url, facebook_url, website_url };
   } catch {
     return null;
   }
