@@ -452,6 +452,11 @@ Deno.serve(async (req) => {
     !resolvedWebsite;
 
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
+  // A Facebook page slug is a strong Instagram-handle candidate: venues almost
+  // always reuse the same handle across networks (fb.com/Stranasanpedro ⇒ try
+  // instagram.com/Stranasanpedro). profile.php?id= pages and anything with
+  // non-handle characters are rejected so we never feed Apify junk.
+  const fbHandleCandidate = fbSlugCandidate(resolvedFacebook);
   const placeId =
     typeof row.google_place_id === "string" ? row.google_place_id : null;
 
@@ -459,8 +464,14 @@ Deno.serve(async (req) => {
   //    vision → FB → serper). Anything that doesn't fit is skipped. ──────────
   const runReviews =
     !reuseGoogle && !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
+  // Run IG whenever we have ANY way to reach a candidate — not only a handle
+  // Google/Firecrawl already resolved. A no-website venue (e.g. a nightclub)
+  // often isn't surfaced by Firecrawl's IG search, but its Facebook slug or a
+  // Perplexity lookup still gets us there. Every candidate is verify-gated
+  // below, so widening the gate never attaches a wrong account.
+  const canDiscoverIg = !!igHandle || !!fbHandleCandidate || !!PERPLEXITY_KEY;
   const runInstagram =
-    !reuseIg && socialLayer && !!APIFY_KEY && !!igHandle &&
+    !reuseIg && socialLayer && !!APIFY_KEY && canDiscoverIg &&
     reserve("apify_instagram", COST.instagram + COST.instagramVerify);
   const runWebsite =
     !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite &&
@@ -595,19 +606,27 @@ Deno.serve(async (req) => {
     // IDENTITY-VERIFIED: a venue name like "Metropolitan Club" is generic, so
     // the searched candidate can be a DIFFERENT same-named account. We scrape
     // the candidate, read its bio/name/link, and confirm it's THIS venue's
-    // (website-domain match, else a strict LLM judge). If it doesn't verify, we
-    // fall back to a Perplexity-resolved handle and verify that. If nothing
-    // verifies, we attach NO Instagram — a missing IG beats a wrong one.
+    // (website-domain match, FB-slug agreement, else a strict LLM judge). We try
+    // candidates in order — the Firecrawl/Google handle, then the Facebook slug
+    // reused as a handle, then a Perplexity-resolved handle — and keep the first
+    // that VERIFIES. If nothing verifies, we attach NO Instagram: a missing IG
+    // beats a wrong one.
     (async () => {
       if (!runInstagram) return;
       const venueCtx = {
         name: row.name as string,
         locationLine: [row.address, row.city].filter(Boolean).join(", "),
         website: resolvedWebsite,
+        facebook: resolvedFacebook,
         category: (row.category as string | null) ?? null,
       };
       const tried = new Set<string>();
-      const attempt = async (handle: string | null) => {
+      // corroborateFb=true means the candidate was found INDEPENDENTLY (Firecrawl
+      // /Google/Perplexity), so agreement with the Facebook slug is real
+      // corroboration. The candidate we DERIVE from the Facebook slug can't use
+      // FB to vouch for itself (circular), so that one must clear the website
+      // match or the LLM judge instead.
+      const attempt = async (handle: string | null, corroborateFb = true) => {
         if (!handle || tried.has(handle.toLowerCase())) return null;
         tried.add(handle.toLowerCase());
         const items = await runApifyActor<Record<string, unknown>>(
@@ -617,14 +636,20 @@ Deno.serve(async (req) => {
         );
         const p = items?.[0];
         if (!p) return null;
-        const ok = await igProfileMatchesVenue(p, venueCtx, OPENAI_KEY);
+        const ok = await igProfileMatchesVenue(p, venueCtx, OPENAI_KEY, corroborateFb);
         return { handle, p, ok };
       };
 
-      // 1) The Firecrawl/Google candidate.
+      // 1) The Firecrawl/Google candidate (independent → FB corroboration ok).
       let chosen = await attempt(igHandle);
-      // 2) If it didn't verify, ask Perplexity for the right account + verify.
-      if ((!chosen || !chosen.ok) && PERPLEXITY_KEY) {
+      // 2) The Facebook slug reused as an IG handle. Derived from FB, so it
+      //    can't corroborate via FB — it leans on the website match / judge.
+      if (!chosen?.ok) {
+        const alt = await attempt(fbHandleCandidate, false);
+        chosen = alt?.ok ? alt : (chosen ?? alt);
+      }
+      // 3) Last resort: ask Perplexity for the right account + verify it.
+      if (!chosen?.ok && PERPLEXITY_KEY) {
         const pp = await discoverChannelsPerplexity(
           PERPLEXITY_KEY,
           venueCtx.name,
@@ -632,7 +657,7 @@ Deno.serve(async (req) => {
           venueCtx.category,
         );
         const alt = await attempt(instagramHandleFromUrl(pp?.instagram_url ?? null));
-        if (alt?.ok) chosen = alt;
+        chosen = alt?.ok ? alt : (chosen ?? alt);
       }
 
       if (chosen?.ok) {
@@ -666,7 +691,7 @@ Deno.serve(async (req) => {
         sources.apify_instagram = {
           ok: false,
           reason: chosen ? "unverified" : "not_found",
-          candidate: igHandle,
+          candidate: igHandle ?? fbHandleCandidate,
           tried: [...tried],
         };
       }
@@ -1612,15 +1637,39 @@ async function discoverChannelsPerplexity(
 }
 
 
+// Bare page slug of a Facebook URL, usable as an Instagram-handle candidate
+// (venues reuse handles across networks). Numeric profile.php?id= pages and
+// anything outside the IG handle charset (≤30 of [A-Za-z0-9._]) return null.
+function fbSlugCandidate(url: string | null | undefined): string | null {
+  const page = facebookPageFromUrl(url);
+  if (!page) return null;
+  let seg: string;
+  try {
+    seg = new URL(page).pathname.split("/").filter(Boolean)[0] ?? "";
+  } catch {
+    return null;
+  }
+  if (!seg || seg === "profile.php") return null;
+  return /^[A-Za-z0-9._]{2,30}$/.test(seg) ? seg : null;
+}
+
 // Does this scraped Instagram profile belong to THIS venue? Generic names
 // ("Metropolitan Club") make the searched candidate unreliable, so we confirm
-// before trusting it: a bio link to the venue's own website domain is an
+// before trusting it: a bio link to the venue's own website domain (or, for an
+// independently-found handle, agreement with the Facebook page slug) is an
 // instant yes; otherwise a strict LLM judge over the handle/name/bio decides,
 // biased to FALSE when unsure. No OpenAI key → reject (don't trust a guess).
 async function igProfileMatchesVenue(
   p: Record<string, unknown>,
-  venue: { name: string; locationLine: string; website: string | null; category: string | null },
+  venue: {
+    name: string;
+    locationLine: string;
+    website: string | null;
+    facebook: string | null;
+    category: string | null;
+  },
   openaiKey: string | undefined,
+  corroborateFb = true,
 ): Promise<boolean> {
   const username = typeof p.username === "string" ? p.username : "";
   const fullName = typeof p.fullName === "string" ? p.fullName : "";
@@ -1637,6 +1686,16 @@ async function igProfileMatchesVenue(
   // Strong signal: the IG bio link points to the venue's own website domain.
   const wd = domainOf(venue.website);
   if (wd && links.some((l) => domainOf(l) === wd)) return true;
+
+  // Strong signal: an INDEPENDENTLY-discovered IG handle/name lines up with the
+  // venue's Facebook page slug (venues reuse handles across networks, so
+  // fb.com/Stranasanpedro + ig handle "stranasanpedro" is the same brand). Skip
+  // when the candidate was derived FROM that slug — then it'd vouch for itself.
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fbKey = corroborateFb ? norm(fbSlugCandidate(venue.facebook) ?? "") : "";
+  if (fbKey.length >= 5 && (norm(username) === fbKey || norm(fullName) === fbKey)) {
+    return true;
+  }
 
   if (!openaiKey) return false;
   const ctrl = new AbortController();
@@ -1662,6 +1721,7 @@ async function igProfileMatchesVenue(
               (venue.locationLine ? `, ${venue.locationLine}` : "") +
               (venue.category ? `, category: ${venue.category}` : "") +
               (venue.website ? `, website: ${venue.website}` : "") +
+              (venue.facebook ? `, facebook: ${venue.facebook}` : "") +
               `\nInstagram: @${username}, name: "${fullName}", bio: "${bio.slice(0, 500)}", ` +
               `links: ${links.join(", ") || "none"}\n\n` +
               `Reply JSON {"match": true} or {"match": false}.`,
