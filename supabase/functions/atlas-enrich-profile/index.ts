@@ -47,6 +47,7 @@ import {
   pickWebsite,
   validHost,
 } from "../_shared/channels.ts";
+import { fetchVenueCategories, inferVenueCategory } from "../_shared/categories.ts";
 
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
 // sonar-pro searches harder than base sonar (which returns null too often on
@@ -948,6 +949,28 @@ Deno.serve(async (req) => {
       update.popular_times = parsed.popular_times;
     }
   }
+
+  // ── Category inference (dynamic, from the live venue_categories table) ───
+  // Read the editable vocabulary at run time and let the classifier pick the
+  // best-fit slug from it — never hardcoded. Prefers the freshly synthesised
+  // editorial summary, falling back to the venue's existing signals + gathered
+  // text. Only overwrites venue.category when we get a valid canonical slug.
+  const categoryList = await fetchVenueCategories(admin);
+  const inferredCategory = await inferVenueCategory(OPENAI_KEY, categoryList, {
+    name: row.name as string,
+    address: (row.address as string | null) ?? null,
+    editorialSummary:
+      (update.editorial_summary as string | undefined) ??
+      (row.editorial_summary as string | null) ??
+      null,
+    description: igBio || serperText || siteMarkdown.slice(0, 1200) || null,
+  });
+  if (inferredCategory) update.category = inferredCategory;
+  sources.category = {
+    ok: !!inferredCategory,
+    slug: inferredCategory,
+    candidates: categoryList.length,
+  };
 
   // ── Cost accounting ──────────────────────────────────────────────────────
   sources.cost = {

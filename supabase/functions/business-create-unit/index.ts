@@ -16,6 +16,7 @@ import { isOnDomain } from "../_shared/onboarding.ts";
 import { invokeArtificialCaller } from "../_shared/internal.ts";
 import { classifyLinks } from "../_shared/channels.ts";
 import { firecrawlScrape } from "../_shared/firecrawl.ts";
+import { fetchVenueCategories, inferVenueCategory } from "../_shared/categories.ts";
 
 const GOOGLE_FIELD_MASK = [
   "id",
@@ -337,6 +338,25 @@ Deno.serve(async (req) => {
   );
   const instagramFollowers = await instagramFollowersPromise;
 
+  // ── Category inference (dynamic, from the live venue_categories table) ──
+  // The category vocabulary is editable, so we read every slug at run time and
+  // let the classifier pick one — never a hardcoded list. Falls back to the
+  // OpenAI synth guess / Google's primary type when inference is unavailable
+  // (no key, lookup error, or no confident match against the live slugs).
+  const categoryList = await fetchVenueCategories(admin);
+  const inferredCategory = await inferVenueCategory(OPENAI_KEY, categoryList, {
+    name: venueName,
+    address,
+    googlePrimaryType: details.primaryType ?? null,
+    googlePrimaryTypeDisplay: details.primaryTypeDisplayName?.text ?? null,
+    googleTypes: details.types ?? [],
+    editorialSummary:
+      details.editorialSummary?.text ??
+      details.generativeSummary?.overview?.text ??
+      null,
+    description: perplexity?.brief?.summary ?? null,
+  });
+
   // ── Step 4: Persist (service role; RLS allows reads only) ──
   // `admin` was already instantiated above for the pre-flight placeId
   // dedupe — reuse the same client for writes.
@@ -367,7 +387,7 @@ Deno.serve(async (req) => {
   const insertRow = {
     name: synth.name || venueName,
     slug,
-    category: synth.category ?? details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
+    category: inferredCategory ?? synth.category ?? details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
     vibe: synth.vibe ?? null,
     price_level: synth.price_level ?? priceLevelFromGoogle(details.priceLevel),
     // Created venues are publicly discoverable but not yet claimed by
