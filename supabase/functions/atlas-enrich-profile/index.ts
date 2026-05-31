@@ -15,10 +15,7 @@
 //   ③ SYNTHESIS              OpenAI "Research Backbone" — reads ONLY the gathered
 //                            material (no web → can't drift) into the canonical
 //                            profile JSON. Model from the 'synthesis quality' param.
-//   ④ SNAPSHOTS + COST CAP   pre-read the latest snapshot to skip fresh sources
-//                            (only fetch the gaps), save every run as a new
-//                            append-only snapshot in Storage, and stop spending
-//                            once the per-run USD cap is hit.
+//   ④ COST CAP               stop spending once the per-run USD cap is hit.
 //
 // CONFIG: every knob lives in app_settings and is read at run time (the DB is
 // the single source of truth; callers don't pass overrides). Every source is
@@ -79,11 +76,6 @@ const SOCIAL_LAYER_TIER = 2;
 // Safety ceiling on the gathered candidate pool before save (the real,
 // source-independent save cap is atlas_save_total_images, applied at the end).
 const PHOTO_CEILING = 50;
-
-// Snapshots: the Storage bucket + how long a snapshot is fresh enough that a
-// pre-read can reuse it (skip the external fetch) instead of re-scraping.
-const SNAPSHOT_BUCKET = "atlas-snapshots";
-const SNAPSHOT_REUSE_DAYS = 14;
 
 // Public bucket where ephemeral source images (Instagram, website) are
 // re-hosted so the gallery survives the source URL expiring / hotlink-blocking.
@@ -198,27 +190,6 @@ type ProfileResult = {
 // analyze caps in the funnel).
 type Img = { url: string; source: "google" | "website" | "instagram" };
 
-// What a snapshot persists — the raw gathered material, so a pre-read can
-// reuse it without re-hitting the external APIs.
-type Gathered = {
-  reviews?: Record<string, unknown>[];
-  reviewCount?: number | null;
-  googleReviewsText?: string;
-  igBio?: string;
-  igFollowers?: number | null;
-  fbFollowers?: number | null;
-  fbRating?: number | null;
-  siteMarkdown?: string;
-  googleImages?: string[];
-  websiteImages?: string[];
-  instagramImages?: string[];
-  discovery?: {
-    instagram_url: string | null;
-    facebook_url: string | null;
-    website_url: string | null;
-  };
-};
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
   if (req.method !== "POST") {
@@ -255,8 +226,6 @@ Deno.serve(async (req) => {
       [
         "atlas_source_tier_ceiling",
         "atlas_synthesis_quality",
-        "atlas_pre_read_snapshots",
-        "atlas_save_snapshots",
         "atlas_gather_google_images",
         "atlas_gather_website_images",
         "atlas_gather_instagram_posts",
@@ -279,8 +248,6 @@ Deno.serve(async (req) => {
   const tierCeiling = num(cfg?.atlas_source_tier_ceiling, 3);
   const synthesisQuality =
     (cfg?.atlas_synthesis_quality as string | undefined) ?? "economy";
-  const preReadSnapshots = (cfg?.atlas_pre_read_snapshots as boolean) ?? true;
-  const saveSnapshots = (cfg?.atlas_save_snapshots as boolean) ?? true;
   // GATHER caps — how many to PULL per source before anything else.
   const gatherGoogleImages = num(cfg?.atlas_gather_google_images, 10);
   const gatherWebsiteImages = num(cfg?.atlas_gather_website_images, 10);
@@ -316,7 +283,7 @@ Deno.serve(async (req) => {
   // ── Cost cap ────────────────────────────────────────────────────────────────
   // Reserve budget BEFORE running each step, in priority order. A step that
   // doesn't fit the remaining budget is disabled (skipped) — so the run never
-  // exceeds the per-run USD cap. Reused-from-snapshot steps cost nothing.
+  // exceeds the per-run USD cap.
   let plannedUsd = 0;
   const cost: Record<string, number> = {};
   const reserve = (label: string, c: number): boolean => {
@@ -325,26 +292,6 @@ Deno.serve(async (req) => {
     cost[label] = c;
     return true;
   };
-
-  // ── Snapshot pre-read ───────────────────────────────────────────────────────
-  // Read the venue's latest snapshot; when it's fresh, reuse its gathered
-  // material and skip the matching external fetch — "only fetch the gaps".
-  let prior: Gathered | null = null;
-  if (preReadSnapshots) {
-    const snap = await loadLatestSnapshot(admin, venueId);
-    if (snap && snap.ageDays <= SNAPSHOT_REUSE_DAYS) {
-      prior = snap.gathered;
-      sources.snapshot_read = { ok: true, age_days: Math.round(snap.ageDays) };
-    } else {
-      sources.snapshot_read = { ok: false, found: !!snap };
-    }
-  }
-
-  const reuseGoogle = !!(prior && (prior.reviews?.length || prior.googleImages?.length));
-  const reuseIg = !!(prior && (prior.igBio || prior.igFollowers != null || prior.instagramImages?.length));
-  const reuseFb = !!(prior && prior.fbFollowers != null);
-  const reuseSite = !!(prior && prior.siteMarkdown);
-  const reuseDiscovery = !!(prior && prior.discovery);
 
   // ── Channel discovery ────────────────────────────────────────────────────
   // The columns may already carry socials harvested from the venue's website
@@ -363,18 +310,6 @@ Deno.serve(async (req) => {
       ? row.website_url
       : null;
 
-  // Reuse discovered channels from the snapshot first.
-  if (reuseDiscovery && prior?.discovery) {
-    resolvedInstagram = resolvedInstagram ?? prior.discovery.instagram_url;
-    resolvedFacebook = resolvedFacebook ?? prior.discovery.facebook_url;
-    resolvedWebsite = resolvedWebsite ?? prior.discovery.website_url;
-    sources.discovery = { reused: true };
-  }
-
-  let discovered: Gathered["discovery"] = reuseDiscovery
-    ? prior?.discovery
-    : undefined;
-
   // Synthesis is core — reserve it first so the profile always gets written.
   const synthCost =
     synthesisQuality === "economy"
@@ -382,13 +317,7 @@ Deno.serve(async (req) => {
       : COST.synthesisStandard;
   const runSynthesis = !!OPENAI_KEY && reserve("synthesis", synthCost);
 
-  // Re-run discovery whenever a channel is STILL missing after snapshot reuse.
-  // A prior run that failed to resolve IG/FB saves a snapshot whose discovery
-  // block has those fields null; gating on `!reuseDiscovery` would let that
-  // cached miss pin the venue to null for the whole reuse window (it would
-  // never retry Firecrawl/Perplexity). Instead, reuse fills the knowns above
-  // and discovery runs for the genuine gaps — its `have` already carries the
-  // reused values, so it only searches the channels that are still missing.
+  // Run discovery whenever a channel is still missing.
   const needsDiscovery =
     socialLayer &&
     (!!FIRECRAWL_KEY || !!PERPLEXITY_KEY) &&
@@ -416,11 +345,6 @@ Deno.serve(async (req) => {
     if (!resolvedInstagram && found.instagram_url) resolvedInstagram = found.instagram_url;
     if (!resolvedFacebook && found.facebook_url) resolvedFacebook = found.facebook_url;
     if (!resolvedWebsite && found.website_url) resolvedWebsite = found.website_url;
-    discovered = {
-      instagram_url: resolvedInstagram,
-      facebook_url: resolvedFacebook,
-      website_url: resolvedWebsite,
-    };
     sources.discovery = {
       ok: true,
       via: found.via,
@@ -454,7 +378,7 @@ Deno.serve(async (req) => {
   // ── Reserve budget for the gather steps (priority: reviews → IG → website →
   //    vision → FB). Anything that doesn't fit is skipped. ───────────────────
   const runReviews =
-    !reuseGoogle && !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
+    !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
   // Run IG whenever we have ANY way to reach a candidate — not only a handle
   // Google/Firecrawl already resolved. A no-website venue (e.g. a nightclub)
   // often isn't surfaced by Firecrawl's IG search, but its Facebook slug or a
@@ -462,10 +386,10 @@ Deno.serve(async (req) => {
   // below, so widening the gate never attaches a wrong account.
   const canDiscoverIg = !!igHandle || !!fbHandleCandidate || !!PERPLEXITY_KEY;
   const runInstagram =
-    !reuseIg && socialLayer && !!APIFY_KEY && canDiscoverIg &&
+    socialLayer && !!APIFY_KEY && canDiscoverIg &&
     reserve("apify_instagram", COST.instagram + COST.instagramVerify);
   const runWebsite =
-    !reuseSite && socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite &&
+    socialLayer && !!FIRECRAWL_KEY && !!resolvedWebsite &&
     reserve("firecrawl", COST.firecrawl * websiteCrawlMaxPages + COST.sort);
   const maxVisionImages = visionEnabled
     ? analyzeGoogleImages + analyzeWebsiteImages + analyzeInstagramImages
@@ -476,29 +400,23 @@ Deno.serve(async (req) => {
     maxVisionImages > 0 &&
     reserve("vision", maxVisionImages * COST.visionPerImage + COST.sort);
   const runFacebook =
-    !reuseFb && socialLayer && !!APIFY_KEY && !!resolvedFacebook && reserve("apify_facebook", COST.facebook);
+    socialLayer && !!APIFY_KEY && !!resolvedFacebook && reserve("apify_facebook", COST.facebook);
 
   // ── Gather (concurrent) ──────────────────────────────────────────────────
-  // Seed reused material from the snapshot first, then run only the live
-  // fetches that weren't reused or budget-capped.
-  let igBio = prior?.igBio ?? "";
-  let igFollowers: number | null = prior?.igFollowers ?? null;
-  let fbFollowers: number | null = prior?.fbFollowers ?? null;
-  let fbRating: number | null = prior?.fbRating ?? null;
-  let siteMarkdown = prior?.siteMarkdown ?? "";
-  let googleReviewsText = prior?.googleReviewsText ?? "";
-  let reviews: Record<string, unknown>[] = prior?.reviews ?? [];
-  let reviewCount: number | null = prior?.reviewCount ?? null;
-  let googleImages: string[] = prior?.googleImages ?? [];
-  let websiteImages: string[] = prior?.websiteImages ?? [];
-  let instagramImages: string[] = prior?.instagramImages ?? [];
+  // Run the live fetches that weren't budget-capped.
+  let igBio = "";
+  let igFollowers: number | null = null;
+  let fbFollowers: number | null = null;
+  let fbRating: number | null = null;
+  let siteMarkdown = "";
+  let googleReviewsText = "";
+  let reviews: Record<string, unknown>[] = [];
+  let reviewCount: number | null = null;
+  let googleImages: string[] = [];
+  let websiteImages: string[] = [];
+  let instagramImages: string[] = [];
   // Only set once the scraped IG profile verifies as THIS venue's account.
-  let verifiedInstagramUrl: string | null = reuseIg ? resolvedInstagram : null;
-
-  if (reuseGoogle) sources.apify_google_reviews = { reused: true, count: reviews.length };
-  if (reuseIg) sources.apify_instagram = { reused: true };
-  if (reuseFb) sources.apify_facebook = { reused: true };
-  if (reuseSite) sources.firecrawl = { reused: true };
+  let verifiedInstagramUrl: string | null = null;
 
   await Promise.all([
     // Apify Google Maps → ALL reviews (Places caps at ~5) + venue PHOTOS in one
@@ -739,16 +657,12 @@ Deno.serve(async (req) => {
   if (verifiedInstagramUrl && verifiedInstagramUrl !== row.instagram_url) {
     update.instagram_url = verifiedInstagramUrl;
   }
-  // Snapshots must store the VERIFIED handle (or null) — never the unverified
-  // candidate — so a future pre-read reuse doesn't resurrect a wrong account.
-  resolvedInstagram = verifiedInstagramUrl;
-  if (discovered) discovered.instagram_url = verifiedInstagramUrl;
 
   // ── Re-host ephemeral images (durable gallery) ───────────────────────────
   // Instagram CDN URLs expire (signed) and some website images hotlink-block;
   // download + re-upload them to the public venue-images bucket so the gallery
   // survives. Best-effort per image — a failed mirror keeps the original URL.
-  // Already-mirrored URLs (snapshot reuse) are skipped inside the helper.
+  // Already-mirrored URLs are skipped inside the helper.
   // Google's lh3 photo URLs are stable, so they're left direct.
   const mirrorBefore = instagramImages.length + websiteImages.length;
   if (mirrorBefore > 0) {
@@ -979,40 +893,6 @@ Deno.serve(async (req) => {
     breakdown: cost,
   };
   update.enrichment_sources = sources;
-
-  // ── Snapshot save ───────────────────────────────────────────────────────────
-  // Append-only: every run writes a fresh snapshot of the gathered material so
-  // the next pre-read can skip the gaps. Best-effort — never fails the enrich.
-  if (saveSnapshots) {
-    const gathered: Gathered = {
-      reviews,
-      reviewCount,
-      googleReviewsText,
-      igBio,
-      igFollowers,
-      fbFollowers,
-      fbRating,
-      siteMarkdown,
-      googleImages,
-      websiteImages,
-      instagramImages,
-      discovery: discovered ?? {
-        instagram_url: resolvedInstagram,
-        facebook_url: resolvedFacebook,
-        website_url: resolvedWebsite,
-      },
-    };
-    const ok = await saveSnapshot(admin, venueId, {
-      version: 1,
-      venue_id: venueId,
-      name: row.name,
-      ts: new Date().toISOString(),
-      gathered,
-      sources,
-      fields: Object.keys(update),
-    });
-    sources.snapshot_write = { ok };
-  }
 
   const { error: updErr } = await admin
     .from("venues")
@@ -1305,58 +1185,6 @@ async function textSortImages(
     return order;
   } catch {
     return null;
-  }
-}
-
-// ── Snapshot helpers (Supabase Storage; append-only) ────────────────────────
-
-async function loadLatestSnapshot(
-  admin: SupabaseClient,
-  venueId: string,
-): Promise<{ ageDays: number; gathered: Gathered } | null> {
-  try {
-    const { data: list, error } = await admin.storage
-      .from(SNAPSHOT_BUCKET)
-      .list(venueId, { limit: 100, sortBy: { column: "name", order: "desc" } });
-    if (error || !list || list.length === 0) return null;
-    const latest = list.find((o) => o.name.endsWith(".json"));
-    if (!latest) return null;
-    const { data: blob, error: dlErr } = await admin.storage
-      .from(SNAPSHOT_BUCKET)
-      .download(`${venueId}/${latest.name}`);
-    if (dlErr || !blob) return null;
-    const parsed = JSON.parse(await blob.text()) as {
-      ts?: string;
-      gathered?: Gathered;
-    };
-    if (!parsed.gathered) return null;
-    const ts = parsed.ts ? Date.parse(parsed.ts) : NaN;
-    const ageDays = Number.isFinite(ts)
-      ? (Date.now() - ts) / 86_400_000
-      : Number.POSITIVE_INFINITY;
-    return { ageDays, gathered: parsed.gathered };
-  } catch {
-    return null;
-  }
-}
-
-async function saveSnapshot(
-  admin: SupabaseClient,
-  venueId: string,
-  payload: unknown,
-): Promise<boolean> {
-  try {
-    // Bucket is provisioned by migration 0056 — no per-run create needed.
-    const name = `${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-    const { error } = await admin.storage
-      .from(SNAPSHOT_BUCKET)
-      .upload(`${venueId}/${name}`, JSON.stringify(payload, null, 2), {
-        contentType: "application/json",
-        upsert: false,
-      });
-    return !error;
-  } catch {
-    return false;
   }
 }
 

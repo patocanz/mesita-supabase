@@ -15,6 +15,9 @@ const COLUMNS: readonly string[] = [
   "slug",
   "name",
   "category",
+  // Human-friendly category copy (emoji + natural-language label),
+  // derived from category via venue_categories.
+  "category_label",
   "vibe",
   "price_level",
   // ISO 4217 code (default MXN). Every monetary amount on a venue —

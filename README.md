@@ -48,7 +48,7 @@ supabase functions deploy <function-name> [<function-name> ...]
 
 | Prefix | Auth pool | Purpose |
 |---|---|---|
-| `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset, Atlas snapshots |
+| `admin-*` | email (`@canzeco.com` + MFA) | Super-admin tooling: verification queue, place search, DB reset |
 | `business-*` | email | Venue owners and team members: CRUD venues, tickets, team, invites |
 | `consumer-*` | phone OTP | Diner-facing flows: venue discovery, tickets, profile, stories |
 | `staff-*` | phone OTP (post-invite) | WhatsApp validator (waiter) post-invite handshake |
