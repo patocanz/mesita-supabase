@@ -603,14 +603,14 @@ Deno.serve(async (req) => {
       }
     })(),
     // Apify → Instagram: followers + bio + post IMAGES (top by likes).
-    // IDENTITY-VERIFIED: a venue name like "Metropolitan Club" is generic, so
-    // the searched candidate can be a DIFFERENT same-named account. We scrape
-    // the candidate, read its bio/name/link, and confirm it's THIS venue's
-    // (website-domain match, FB-slug agreement, else a strict LLM judge). We try
-    // candidates in order — the Firecrawl/Google handle, then the Facebook slug
-    // reused as a handle, then a Perplexity-resolved handle — and keep the first
-    // that VERIFIES. If nothing verifies, we attach NO Instagram: a missing IG
-    // beats a wrong one.
+    // IDENTITY-CHECKED but GENEROUS: we scrape the candidate and confirm it's
+    // this venue's OR its brand's account (website-domain match, FB-slug
+    // agreement, brand-name match, else a true-biased LLM judge) — a franchise's
+    // single brand account is a valid result. We try candidates in order — the
+    // Firecrawl/Google handle, then the Facebook slug reused as a handle, then a
+    // Perplexity-resolved handle — and keep the first that passes. Only a
+    // genuinely dead/nonexistent handle is dropped: a missing IG is the worse
+    // miss, so when in doubt we attach the brand account rather than nothing.
     (async () => {
       if (!runInstagram) return;
       const venueCtx = {
@@ -1574,9 +1574,12 @@ async function discoverChannelsPerplexity(
     `. Return strict JSON with the canonical URLs of its Instagram profile, ` +
     `Facebook page, and website.\n` +
     `- instagram_url: give your BEST candidate even if not fully certain ` +
-    `(it is independently verified afterwards). Only null if you truly find none.\n` +
-    `- facebook_url and website_url: only return a URL you are confident is THIS ` +
-    `exact venue's; use null when unsure. Never invent a URL.`;
+    `(it is independently verified afterwards). For a franchise or chain, the ` +
+    `BRAND's main profile is a valid answer. Only null if you truly find none.\n` +
+    `- facebook_url: give your BEST candidate — again, the brand's main page is ` +
+    `fine for a chain. Only null if you truly find none.\n` +
+    `- website_url: only return a URL you are confident is THIS venue's (or its ` +
+    `brand's); use null when unsure. Never invent a URL.`;
   try {
     const r = await fetch(PERPLEXITY_URL, {
       method: "POST",
@@ -1590,7 +1593,7 @@ async function discoverChannelsPerplexity(
           {
             role: "system",
             content:
-              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For Instagram, propose your best candidate (it gets verified downstream); for Facebook and website, prefer null over a wrong guess. Never fabricate a URL out of thin air.",
+              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For a franchise or multi-location brand, the brand's MAIN Instagram/Facebook is an acceptable answer. Propose your best Instagram and Facebook candidate — a missing profile is worse than an imperfect one — but for website prefer null over a wrong guess. Never fabricate a URL out of thin air.",
           },
           { role: "user", content: prompt },
         ],
@@ -1673,12 +1676,13 @@ function isDeadIgStub(p: Record<string, unknown>): boolean {
   return !hasFollowers && !hasName && !hasBio && !hasPosts;
 }
 
-// Does this scraped Instagram profile belong to THIS venue? Generic names
-// ("Metropolitan Club") make the searched candidate unreliable, so we confirm
-// before trusting it: a bio link to the venue's own website domain (or, for an
-// independently-found handle, agreement with the Facebook page slug) is an
-// instant yes; otherwise a strict LLM judge over the handle/name/bio decides,
-// biased to FALSE when unsure. No OpenAI key → reject (don't trust a guess).
+// Does this scraped Instagram profile belong to THIS venue or its brand? We
+// confirm before trusting it, but lean GENEROUS — a missing IG is a worse miss
+// than a brand-level one. Instant yes on a bio link to the venue's website
+// domain, agreement with the Facebook page slug, or a handle/name carrying the
+// venue's brand (so franchises resolve to their one brand account). Otherwise
+// an LLM judge decides, biased toward TRUE, rejecting only a clearly different
+// business. No OpenAI key → fall back to the brand/slug signals above only.
 async function igProfileMatchesVenue(
   p: Record<string, unknown>,
   venue: {
@@ -1707,13 +1711,36 @@ async function igProfileMatchesVenue(
   const wd = domainOf(venue.website);
   if (wd && links.some((l) => domainOf(l) === wd)) return true;
 
+  const fold = (s: string) =>
+    s.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+  const norm = (s: string) => fold(s).replace(/[^a-z0-9]/g, "");
+  const uname = norm(username);
+  const fname = norm(fullName);
+
   // Strong signal: an INDEPENDENTLY-discovered IG handle/name lines up with the
   // venue's Facebook page slug (venues reuse handles across networks, so
   // fb.com/Stranasanpedro + ig handle "stranasanpedro" is the same brand). Skip
   // when the candidate was derived FROM that slug — then it'd vouch for itself.
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const fbKey = corroborateFb ? norm(fbSlugCandidate(venue.facebook) ?? "") : "";
-  if (fbKey.length >= 5 && (norm(username) === fbKey || norm(fullName) === fbKey)) {
+  if (fbKey.length >= 5 && (uname === fbKey || fname === fbKey)) return true;
+
+  // Strong signal: the handle/name carries the venue's BRAND — its name minus
+  // the city/location words. Franchises and multi-location brands run ONE
+  // account for the whole brand, so "Mochomos Monterrey" → @mochomos is the
+  // right match even though the handle isn't location-specific. We'd rather
+  // attach the brand account than show nothing — a missing IG is the worse miss.
+  const locTokens = new Set(
+    fold(venue.locationLine)
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3),
+  );
+  const brandKey = norm(
+    fold(venue.name)
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w && !locTokens.has(w))
+      .join(""),
+  );
+  if (brandKey.length >= 5 && (uname.includes(brandKey) || fname.includes(brandKey))) {
     return true;
   }
 
@@ -1734,9 +1761,12 @@ async function igProfileMatchesVenue(
           {
             role: "user",
             content:
-              `Decide if an Instagram profile is the OFFICIAL account of THE EXACT ` +
-              `venue below (same business, same city). A different business that ` +
-              `merely shares a similar name is NOT a match — answer false when unsure.\n\n` +
+              `Decide if an Instagram profile belongs to the venue below OR to the ` +
+              `brand/chain it is part of. For a franchise or multi-location business ` +
+              `the brand's MAIN account counts as a match even when it isn't specific ` +
+              `to this location. Answer false ONLY when the profile is clearly a ` +
+              `DIFFERENT, unrelated business; when the name plausibly matches the ` +
+              `venue or its brand, prefer true.\n\n` +
               `Venue: "${venue.name}"` +
               (venue.locationLine ? `, ${venue.locationLine}` : "") +
               (venue.category ? `, category: ${venue.category}` : "") +
