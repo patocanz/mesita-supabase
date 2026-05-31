@@ -160,7 +160,7 @@ verify_jwt = false
 # Google Places key (SUPA_GMP_KEY) only lives inside these EFs; natural
 # callers forward requests through invokeArtificialCaller. Atlas is the
 # umbrella for every venue-research / venue-data-source surface (Google,
-# Foursquare, schema.org, Atlas Storage snapshots, …).
+# Foursquare, schema.org, …).
 
 [functions.atlas-suggest-venue]
 verify_jwt = false
@@ -346,19 +346,12 @@ verify_jwt = true
 [functions.admin-reset-database]
 verify_jwt = true
 
-# Atlas operations — venue profile research + enrichment, owned by
-# admins. Reads/writes the Atlas Storage bucket; see the Atlas concept
-# notes for the snapshot model.
+# Atlas configuration — venue research/enrichment knobs on app_settings,
+# owned by admins.
 [functions.admin-get-settings]
 verify_jwt = true
 
-[functions.admin-set-atlas-pre-read]
-verify_jwt = true
-
 [functions.admin-update-atlas-config]
-verify_jwt = true
-
-[functions.admin-snapshot-mesita]
 verify_jwt = true
 
 # Re-run the profile enricher on an existing venue (super-admin only).

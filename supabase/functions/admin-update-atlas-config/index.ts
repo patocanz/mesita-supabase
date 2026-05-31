@@ -7,13 +7,10 @@
 // optional; only the keys present in the body are written, so the UI can
 // save one control at a time:
 //
-//   saveSnapshots   (boolean)  → atlas_save_snapshots
 //   gatherGoogleImages / gatherWebsiteImages (≤10), gatherInstagramPosts (≤30)
 //   analyzeGoogleImages / analyzeWebsiteImages / analyzeInstagramImages (≤10)
 //   saveTotalImages (≤20)      → atlas_save_total_images (source-independent)
 //   imageAnalysisPrompt / imageSortingPrompt
-//
-// The separate pre-read toggle keeps its own EF (admin-set-atlas-pre-read).
 //
 // Auth: caller's JWT email must be in public.super_admins.
 
@@ -27,8 +24,6 @@ import {
 } from "../_shared/auth.ts";
 
 type Body = {
-  saveSnapshots?: boolean;
-  snapshotOnBusinessEdit?: boolean;
   // Sourcing
   sourceTierCeiling?: number;
   sourceOverrides?: Record<string, unknown>;
@@ -91,23 +86,6 @@ Deno.serve(async (req) => {
   const body = bodyRes.body;
 
   const patch: Record<string, unknown> = {};
-
-  if (body.saveSnapshots !== undefined) {
-    if (typeof body.saveSnapshots !== "boolean") {
-      return json({ ok: false, error: "saveSnapshots must be a boolean" }, 400);
-    }
-    patch.atlas_save_snapshots = body.saveSnapshots;
-  }
-
-  if (body.snapshotOnBusinessEdit !== undefined) {
-    if (typeof body.snapshotOnBusinessEdit !== "boolean") {
-      return json(
-        { ok: false, error: "snapshotOnBusinessEdit must be a boolean" },
-        400,
-      );
-    }
-    patch.atlas_snapshot_on_business_edit = body.snapshotOnBusinessEdit;
-  }
 
   // ── Gather caps (pull per source) ───────────────────────────────────────
   if (body.gatherGoogleImages !== undefined) {
@@ -257,7 +235,7 @@ Deno.serve(async (req) => {
     .update(patch)
     .eq("id", 1)
     .select(
-      "atlas_save_snapshots, atlas_snapshot_on_business_edit, atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_gather_google_images, atlas_gather_website_images, atlas_gather_instagram_posts, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_save_total_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
+      "atlas_source_tier_ceiling, atlas_source_overrides, atlas_website_crawl_max_pages, atlas_gather_google_images, atlas_gather_website_images, atlas_gather_instagram_posts, atlas_image_vision_enabled, atlas_analyze_google_images, atlas_analyze_website_images, atlas_analyze_instagram_images, atlas_save_total_images, atlas_image_analysis_prompt, atlas_image_sorting_prompt, atlas_synthesis_quality, atlas_per_run_cost_cap_usd, updated_at",
     )
     .single();
   if (error) {
@@ -269,8 +247,6 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    atlasSaveSnapshots: data.atlas_save_snapshots,
-    atlasSnapshotOnBusinessEdit: data.atlas_snapshot_on_business_edit,
     atlasSourceTierCeiling: data.atlas_source_tier_ceiling,
     atlasSourceOverrides: data.atlas_source_overrides,
     atlasWebsiteCrawlMaxPages: data.atlas_website_crawl_max_pages,
