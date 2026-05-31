@@ -108,6 +108,11 @@ const COST = {
 
 type Body = { venue_id?: string };
 
+// Atlas writes a venue description at most this long. The column + the
+// business Place editor accept up to 2000 chars; Atlas fills the first half
+// and leaves the business room to expand it.
+const ATLAS_DESCRIPTION_MAX = 1000;
+
 const PROFILE_SCHEMA = {
   type: "object",
   properties: {
@@ -116,6 +121,7 @@ const PROFILE_SCHEMA = {
     established_year: { type: ["integer", "null"] },
     executive_chef: { type: ["string", "null"] },
     editorial_summary: { type: ["string", "null"] },
+    description: { type: ["string", "null"] },
     details: {
       type: "object",
       properties: {
@@ -182,6 +188,7 @@ type ProfileResult = {
   established_year?: number | null;
   executive_chef?: string | null;
   editorial_summary?: string | null;
+  description?: string | null;
   details?: Record<string, unknown> | null;
   menus?: unknown[] | null;
   popular_times?: unknown[] | null;
@@ -876,7 +883,10 @@ Deno.serve(async (req) => {
     (row.category ? ` (category: ${row.category})` : "") +
     `, using ONLY the source material below. Return a single JSON object ` +
     `matching the schema. Extract the menu from the website content when ` +
-    `present (real dish names + prices only). Use null or [] for anything the ` +
+    `present (real dish names + prices only). Write "description" as an ` +
+    `inviting, factual 2-4 sentence venue description for the public Place ` +
+    `page (max ${ATLAS_DESCRIPTION_MAX} characters), grounded in the sources. ` +
+    `Use null or [] for anything the ` +
     `sources don't support. Never invent ratings, reviewer quotes, prices, or ` +
     `a chef's name.` +
     (grounding ? `\n\n--- SOURCE MATERIAL ---\n${grounding}` : "\n\n(No extra source material was gathered.)");
@@ -938,6 +948,12 @@ Deno.serve(async (req) => {
     if (parsed.executive_chef) update.executive_chef = parsed.executive_chef;
     if (parsed.editorial_summary) {
       update.editorial_summary = parsed.editorial_summary;
+    }
+    // The place's public description — written at the end of every run. Hard
+    // cap at 1000 chars (the column/editor allow 2000; the business can expand
+    // it). Only overwrite when synthesis actually produced text.
+    if (parsed.description && parsed.description.trim()) {
+      update.description = parsed.description.trim().slice(0, ATLAS_DESCRIPTION_MAX);
     }
     if (parsed.details && typeof parsed.details === "object") {
       update.details = parsed.details;
