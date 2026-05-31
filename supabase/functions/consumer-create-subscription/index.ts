@@ -2,17 +2,15 @@
 //
 // Authenticated. The paid "door" into Mesita Premium.
 //
-// Two modes, chosen by whether STRIPE_SECRET_KEY is set:
+// Two modes, chosen by the MOCK_SUBSCRIPTION toggle below:
 //
-//   • MOCK (no STRIPE_SECRET_KEY) — the launch default while the real
-//     payment rail is being wired. Grants Premium immediately (origin
-//     'subscription'), records a mock active subscription, and returns the
-//     success URL so the client's redirect lands on the post-checkout page.
-//     No money moves. Flip to real billing later just by setting the secret.
+//   • MOCK — grants Premium immediately (origin 'subscription'), records a
+//     mock active subscription, and returns the success URL so the client's
+//     redirect lands on the post-checkout page. No money moves.
 //
-//   • REAL (STRIPE_SECRET_KEY set) — creates a Stripe Checkout Session and
-//     returns its hosted URL. Tier is NOT granted here; the Stripe webhook
-//     (stripe-handle-webhook) flips it once payment clears.
+//   • REAL — creates a Stripe Checkout Session and returns its hosted URL.
+//     Tier is NOT granted here; the Stripe webhook (stripe-handle-webhook)
+//     flips it once payment clears.
 //
 // Body: { successUrl?: string, cancelUrl?: string }
 // Response: { ok: true, checkout_url: string, mock?: true }
@@ -26,6 +24,16 @@ import { getTierConfig } from "../_shared/membership.ts";
 type Body = { successUrl?: string; cancelUrl?: string };
 
 const MOCK_PERIOD_DAYS = 30;
+
+// ⚠️ DEMO MOCK — the single on/off switch for instant Premium.
+//
+// When true, "Subscribe" grants Premium right away with no payment and no
+// Stripe call. This is the easy change: set the MOCK_SUBSCRIPTION env to
+// "false" (or flip this default to false) and redeploy to require a real
+// Stripe Checkout payment again. Mock also runs whenever STRIPE_SECRET_KEY
+// is absent, so a project with no Stripe secret still works out of the box.
+const MOCK_SUBSCRIPTION =
+  (Deno.env.get("MOCK_SUBSCRIPTION") ?? "true").toLowerCase() !== "false";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -51,7 +59,9 @@ Deno.serve(async (req) => {
   const stripeKey = Deno.env.get("STRIPE_SECRET_KEY");
 
   // ── MOCK mode ───────────────────────────────────────────────────────────
-  if (!stripeKey) {
+  // Fires when the demo toggle is on, or when there's no Stripe secret to
+  // run real billing with.
+  if (MOCK_SUBSCRIPTION || !stripeKey) {
     const periodEnd = new Date(
       Date.now() + MOCK_PERIOD_DAYS * 24 * 60 * 60 * 1000,
     ).toISOString();
