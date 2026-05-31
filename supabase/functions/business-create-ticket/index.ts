@@ -132,7 +132,7 @@ Deno.serve(async (req) => {
   const venueRow = await admin
     .from("venues")
     .select(
-      "id, name, cashback_percent, welcome_free_rate, welcome_premium_rate, free_rate, premium_rate, listing_type, status, fiscal_type",
+      "id, name, cashback_percent, welcome_free_rate, welcome_premium_rate, free_rate, premium_rate, monthly_promo_cap, listing_type, status, fiscal_type",
     )
     .eq("id", venueId)
     .maybeSingle();
@@ -201,6 +201,17 @@ Deno.serve(async (req) => {
 
   const total = subtotal + tip;
 
+  // ── Ticket cap (eligible-spend ceiling) ───────────────────────────────
+  // The promo applies only to the first `monthly_promo_cap` of each bill —
+  // a peso amount in the venue's currency (major units: 200/500/1000/2000),
+  // or null for no cap. Beyond the cap the guest pays full price, so the
+  // reward = rate × min(bill, cap). Applied to both the discount (informal)
+  // and cashback-earn (formal) rails so one big ticket can't blow past the
+  // venue's per-visit exposure.
+  const capPesos = venue.monthly_promo_cap;
+  const eligibleCents =
+    capPesos != null && capPesos > 0 ? Math.min(total, capPesos * 100) : total;
+
   // ── Branch the snapshot by fiscal type ────────────────────────────────
   // Formal:   cashback EARN on gross; redemption capped at min(balance, total).
   // Informal: discount snapshot at the configured rate against the bill total,
@@ -232,10 +243,10 @@ Deno.serve(async (req) => {
       );
     }
     redeemCents = redeemRequested;
-    cashbackCents = Math.floor((total * ratePercent) / 100);
+    cashbackCents = Math.floor((eligibleCents * ratePercent) / 100);
   } else {
     discountPercent = ratePercent;
-    discountCents = Math.floor((total * ratePercent) / 100);
+    discountCents = Math.floor((eligibleCents * ratePercent) / 100);
     if (discountCents > total) discountCents = total;
     // Balance is now portable across fiscal types. At an Informal venue
     // the consumer's cashback balance is applied on top of the discount:
