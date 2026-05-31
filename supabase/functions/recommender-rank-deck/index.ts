@@ -1,7 +1,7 @@
 // Supabase Edge Function — recommender-rank-deck (artificial caller)
 //
 // Pure ranking pipeline. Takes a location + optional consumer profile and
-// returns a curated 20-card deck for the consumer swipe view. Anonymous
+// returns a curated 50-card deck for the consumer swipe view. Anonymous
 // requests are valid — discovery is public until sign-up, so the natural
 // caller passes profile=null when there's no session.
 //
@@ -34,7 +34,7 @@ import { fetchCandidatePool } from "../_shared/recommender-pool.ts";
 
 const CANDIDATE_POOL = 200;
 const MAX_PER_CATEGORY = 4;
-const DEFAULT_LIMIT = 20;
+const DEFAULT_LIMIT = 50;
 const DEFAULT_RADIUS_KM = 25;
 const LAZY_EMBED_BATCH = 50;
 
@@ -256,7 +256,7 @@ function fallbackRank(rows: VenueRow[]): VenueRow[] {
   });
 }
 
-// Cap the final deck so we don't return 20 identical "Italian" cards.
+// Cap the final deck so we don't return 50 identical "Italian" cards.
 function diversify(rows: VenueRow[], limit: number, perCategory: number): VenueRow[] {
   const out: VenueRow[] = [];
   const seenCat = new Map<string, number>();
