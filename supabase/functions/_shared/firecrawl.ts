@@ -86,8 +86,24 @@ export async function firecrawlSearch(
       signal: ctrl.signal,
     });
     if (!r.ok) return [];
-    const d = (await r.json()) as { data?: unknown[]; results?: unknown[] };
-    const arr = Array.isArray(d.data) ? d.data : Array.isArray(d.results) ? d.results : [];
+    // Response shape drifted: the current /v1/search API nests results by source
+    // under `data` ({ web: [...], news: [...], images: [...] }). Older shapes put
+    // a flat array on `data` or `results`. Accept all three so discovery keeps
+    // working across versions — web first (what channel discovery wants), then
+    // news/images as a fallback.
+    const d = (await r.json()) as {
+      data?: unknown[] | { web?: unknown[]; news?: unknown[]; images?: unknown[] };
+      results?: unknown[];
+    };
+    const collect = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+    let arr: unknown[];
+    if (Array.isArray(d.data)) {
+      arr = d.data;
+    } else if (d.data && typeof d.data === "object") {
+      arr = [...collect(d.data.web), ...collect(d.data.news), ...collect(d.data.images)];
+    } else {
+      arr = collect(d.results);
+    }
     return arr
       .map((x) =>
         x && typeof (x as { url?: unknown }).url === "string" ? (x as { url: string }).url : "",

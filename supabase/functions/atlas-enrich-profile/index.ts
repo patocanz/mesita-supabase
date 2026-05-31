@@ -635,7 +635,12 @@ Deno.serve(async (req) => {
           APIFY_KEY!,
         );
         const p = items?.[0];
-        if (!p) return null;
+        // For a NONEXISTENT handle the scraper still returns a non-null object —
+        // the username echoed back with every data field null/empty. Treat that
+        // empty stub as not-found so a dead handle (e.g. a guessed FB-slug that
+        // isn't a real IG account) never reaches the identity judge and gets
+        // falsely "verified". A real venue account always has at least followers.
+        if (!p || isDeadIgStub(p)) return null;
         const ok = await igProfileMatchesVenue(p, venueCtx, OPENAI_KEY, corroborateFb);
         return { handle, p, ok };
       };
@@ -1651,6 +1656,21 @@ function fbSlugCandidate(url: string | null | undefined): string | null {
   }
   if (!seg || seg === "profile.php") return null;
   return /^[A-Za-z0-9._]{2,30}$/.test(seg) ? seg : null;
+}
+
+// The Instagram profile scraper returns a non-null object even for a handle
+// that DOESN'T EXIST: the requested username echoed back with every data field
+// null/empty. That empty stub must be rejected before identity verification, or
+// a guessed handle (e.g. a Facebook slug reused as an IG handle) could be
+// "verified" against nothing. A real account always carries at least followers,
+// a display name, a bio, or recent posts — a stub carries none of these.
+function isDeadIgStub(p: Record<string, unknown>): boolean {
+  if (typeof p.error === "string" && p.error.length > 0) return true;
+  const hasFollowers = numOf(p.followersCount) != null;
+  const hasName = typeof p.fullName === "string" && p.fullName.trim().length > 0;
+  const hasBio = typeof p.biography === "string" && p.biography.trim().length > 0;
+  const hasPosts = Array.isArray(p.latestPosts) && p.latestPosts.length > 0;
+  return !hasFollowers && !hasName && !hasBio && !hasPosts;
 }
 
 // Does this scraped Instagram profile belong to THIS venue? Generic names
