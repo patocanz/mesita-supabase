@@ -209,7 +209,6 @@ type Gathered = {
   fbFollowers?: number | null;
   fbRating?: number | null;
   siteMarkdown?: string;
-  serperText?: string;
   googleImages?: string[];
   websiteImages?: string[];
   instagramImages?: string[];
@@ -303,14 +302,13 @@ Deno.serve(async (req) => {
     (cfg?.atlas_image_sorting_prompt as string | undefined)?.trim() ||
     "Rank these venue photos best to worst for a should-we-go-tonight decision. We sell EXPERIENCES: weight beautiful place / ambiance / vibe shots EQUALLY with food. Favor visual quality, representativeness, and a balanced mix. Drop duplicates, blurry, dark, or text-heavy images.";
   const costCapUsd = num(Number(cfg?.atlas_per_run_cost_cap_usd), 1.0) || 1.0;
-  // Whole social/website/SERP layer runs only when the ceiling allows tier 2.
+  // Whole social/website layer runs only when the ceiling allows tier 2.
   const socialLayer = tierCeiling >= SOCIAL_LAYER_TIER;
 
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
   const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
   const APIFY_KEY = Deno.env.get("APIFY_KEY");
   const FIRECRAWL_KEY = Deno.env.get("FIRECRAWL_KEY");
-  const SERPER_KEY = Deno.env.get("SERPER_KEY");
 
   const sources: Record<string, unknown> = {};
   const update: Record<string, unknown> = { enriched_at: new Date().toISOString() };
@@ -346,7 +344,6 @@ Deno.serve(async (req) => {
   const reuseIg = !!(prior && (prior.igBio || prior.igFollowers != null || prior.instagramImages?.length));
   const reuseFb = !!(prior && prior.fbFollowers != null);
   const reuseSite = !!(prior && prior.siteMarkdown);
-  const reuseSerper = !!(prior && prior.serperText);
   const reuseDiscovery = !!(prior && prior.discovery);
 
   // ── Channel discovery ────────────────────────────────────────────────────
@@ -445,12 +442,6 @@ Deno.serve(async (req) => {
     update.website_url = resolvedWebsite;
   }
 
-  // Only reach for Serper when Google Places came back thin.
-  const googleThin =
-    row.google_stars_overall == null ||
-    !row.editorial_summary ||
-    !resolvedWebsite;
-
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
   // A Facebook page slug is a strong Instagram-handle candidate: venues almost
   // always reuse the same handle across networks (fb.com/Stranasanpedro ⇒ try
@@ -461,7 +452,7 @@ Deno.serve(async (req) => {
     typeof row.google_place_id === "string" ? row.google_place_id : null;
 
   // ── Reserve budget for the gather steps (priority: reviews → IG → website →
-  //    vision → FB → serper). Anything that doesn't fit is skipped. ──────────
+  //    vision → FB). Anything that doesn't fit is skipped. ───────────────────
   const runReviews =
     !reuseGoogle && !!APIFY_KEY && !!placeId && reserve("apify_google", COST.compass);
   // Run IG whenever we have ANY way to reach a candidate — not only a handle
@@ -486,8 +477,6 @@ Deno.serve(async (req) => {
     reserve("vision", maxVisionImages * COST.visionPerImage + COST.sort);
   const runFacebook =
     !reuseFb && socialLayer && !!APIFY_KEY && !!resolvedFacebook && reserve("apify_facebook", COST.facebook);
-  const runSerper =
-    !reuseSerper && socialLayer && !!SERPER_KEY && googleThin && reserve("serper", COST.perplexity);
 
   // ── Gather (concurrent) ──────────────────────────────────────────────────
   // Seed reused material from the snapshot first, then run only the live
@@ -497,7 +486,6 @@ Deno.serve(async (req) => {
   let fbFollowers: number | null = prior?.fbFollowers ?? null;
   let fbRating: number | null = prior?.fbRating ?? null;
   let siteMarkdown = prior?.siteMarkdown ?? "";
-  let serperText = prior?.serperText ?? "";
   let googleReviewsText = prior?.googleReviewsText ?? "";
   let reviews: Record<string, unknown>[] = prior?.reviews ?? [];
   let reviewCount: number | null = prior?.reviewCount ?? null;
@@ -511,7 +499,6 @@ Deno.serve(async (req) => {
   if (reuseIg) sources.apify_instagram = { reused: true };
   if (reuseFb) sources.apify_facebook = { reused: true };
   if (reuseSite) sources.firecrawl = { reused: true };
-  if (reuseSerper) sources.serper = { reused: true };
 
   await Promise.all([
     // Apify Google Maps → ALL reviews (Places caps at ~5) + venue PHOTOS in one
@@ -563,44 +550,6 @@ Deno.serve(async (req) => {
         images: googleImages.length,
         sample_keys: raw[0] ? Object.keys(raw[0]).slice(0, 25) : [],
       };
-    })(),
-    // Serper → SERP knowledge panel, ONLY when Google came back thin.
-    (async () => {
-      if (!runSerper) return;
-      try {
-        const q = [row.name, row.city].filter(Boolean).join(" ");
-        const r = await fetch("https://google.serper.dev/search", {
-          method: "POST",
-          headers: { "X-API-KEY": SERPER_KEY!, "Content-Type": "application/json" },
-          body: JSON.stringify({ q, gl: "mx", hl: "es" }),
-        });
-        if (!r.ok) {
-          sources.serper = { ok: false, status: r.status };
-          return;
-        }
-        const d = (await r.json()) as {
-          knowledgeGraph?: Record<string, unknown>;
-          organic?: { snippet?: string }[];
-        };
-        const kg = d.knowledgeGraph ?? {};
-        const kgLine = [
-          typeof kg.title === "string" ? kg.title : "",
-          typeof kg.type === "string" ? kg.type : "",
-          typeof kg.description === "string" ? kg.description : "",
-          typeof kg.address === "string" ? `Address: ${kg.address}` : "",
-        ]
-          .filter(Boolean)
-          .join(". ");
-        const snippets = (d.organic ?? [])
-          .slice(0, 3)
-          .map((o) => o.snippet)
-          .filter((s): s is string => !!s)
-          .join("\n");
-        serperText = [kgLine, snippets].filter(Boolean).join("\n").slice(0, 3000);
-        sources.serper = { ok: !!serperText, reason: "google_thin" };
-      } catch {
-        sources.serper = { ok: false };
-      }
     })(),
     // Apify → Instagram: followers + bio + post IMAGES (top by likes).
     // IDENTITY-CHECKED but GENEROUS: we scrape the candidate and confirm it's
@@ -908,7 +857,6 @@ Deno.serve(async (req) => {
   const grounding = [
     igBio ? `Instagram bio: ${igBio}` : "",
     googleReviewsText ? `Google reviews (sample):\n${googleReviewsText}` : "",
-    serperText ? `Search results:\n${serperText}` : "",
     siteMarkdown ? `Website content (excerpt):\n${siteMarkdown}` : "",
   ]
     .filter(Boolean)
@@ -1015,7 +963,7 @@ Deno.serve(async (req) => {
       (update.editorial_summary as string | undefined) ??
       (row.editorial_summary as string | null) ??
       null,
-    description: igBio || serperText || siteMarkdown.slice(0, 1200) || null,
+    description: igBio || siteMarkdown.slice(0, 1200) || null,
   });
   if (inferredCategory) update.category = inferredCategory;
   sources.category = {
@@ -1045,7 +993,6 @@ Deno.serve(async (req) => {
       fbFollowers,
       fbRating,
       siteMarkdown,
-      serperText,
       googleImages,
       websiteImages,
       instagramImages,
@@ -1497,16 +1444,37 @@ async function resolveChannels(opts: {
   if (facebook) via.facebook = "google";
   if (website) via.website = "google";
 
-  const cityPart = opts.city ? ` ${opts.city}` : "";
+  const scope = [opts.name, opts.category ?? "", opts.city ?? ""]
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(" ");
 
-  // 2. Firecrawl Search — one targeted query per missing channel.
+  // 2. Firecrawl Search — simple, broad queries to avoid false negatives.
   if (opts.firecrawlKey) {
     const key = opts.firecrawlKey;
-    const search = (term: string) => firecrawlSearch(key, `${opts.name}${cityPart} ${term}`);
+    const searchMany = async (queries: string[]) => {
+      const runs = await Promise.all(queries.map((q) => firecrawlSearch(key, q, 6)));
+      return dedup(runs.flat()).slice(0, 24);
+    };
+    const igQueries = [
+      `${scope} oficial instagram`,
+      `${scope} official instagram`,
+      `${scope} instagram`,
+    ];
+    const fbQueries = [
+      `${scope} oficial facebook`,
+      `${scope} official facebook`,
+      `${scope} facebook`,
+    ];
+    const webQueries = [
+      `${scope} sitio oficial website`,
+      `${scope} official website`,
+      `${scope} website`,
+    ];
     const [igHits, fbHits, webHits] = await Promise.all([
-      instagram ? Promise.resolve<string[]>([]) : search("instagram"),
-      facebook ? Promise.resolve<string[]>([]) : search("facebook"),
-      website ? Promise.resolve<string[]>([]) : search("official website"),
+      instagram ? Promise.resolve<string[]>([]) : searchMany(igQueries),
+      facebook ? Promise.resolve<string[]>([]) : searchMany(fbQueries),
+      website ? Promise.resolve<string[]>([]) : searchMany(webQueries),
     ]);
     if (!instagram) {
       const hit = pickInstagram(igHits);
@@ -1578,8 +1546,10 @@ async function discoverChannelsPerplexity(
     `BRAND's main profile is a valid answer. Only null if you truly find none.\n` +
     `- facebook_url: give your BEST candidate — again, the brand's main page is ` +
     `fine for a chain. Only null if you truly find none.\n` +
-    `- website_url: only return a URL you are confident is THIS venue's (or its ` +
-    `brand's); use null when unsure. Never invent a URL.`;
+    `- website_url: return your BEST likely official website candidate for this ` +
+    `venue (or its brand). Use null only if you truly find none. Never invent a URL.\n` +
+    `When names are ambiguous (example: "Strana"), use city/category to pick the ` +
+    `most likely match, but prefer best plausible candidate over null.`;
   try {
     const r = await fetch(PERPLEXITY_URL, {
       method: "POST",
@@ -1593,7 +1563,7 @@ async function discoverChannelsPerplexity(
           {
             role: "system",
             content:
-              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For a franchise or multi-location brand, the brand's MAIN Instagram/Facebook is an acceptable answer. Propose your best Instagram and Facebook candidate — a missing profile is worse than an imperfect one — but for website prefer null over a wrong guess. Never fabricate a URL out of thin air.",
+              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For a franchise or multi-location brand, the brand's MAIN Instagram/Facebook/website is acceptable. Return best plausible candidates; use null only when you truly cannot find one. Never fabricate a URL out of thin air.",
           },
           { role: "user", content: prompt },
         ],
