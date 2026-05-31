@@ -15,7 +15,7 @@
 // Caller must be an owner of the venue (super-admins pass through).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -42,8 +42,7 @@ Deno.serve(async (req) => {
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
 
-  let body: Body = {};
-  try { body = (await req.json()) as Body; } catch { /* empty */ }
+  const body = await readJsonOr<Body>(req, {});
   const venueId = (body.venueId ?? "").trim();
   const email = (body.email ?? "").trim().toLowerCase();
   const role = body.role ?? "editor";

@@ -16,7 +16,7 @@
 // Deploy: supabase functions deploy atlas-search-venues
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { adminClient, readEFEnv } from "../_shared/auth.ts";
 import { requireInternalCaller } from "../_shared/internal.ts";
 import {
@@ -81,12 +81,9 @@ Deno.serve(async (req) => {
 
   const admin = adminClient(env);
 
-  let body: RequestBody = {};
-  try {
-    body = (await req.json()) as RequestBody;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" });
-  }
+  const bodyRes = await readJson<RequestBody>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const queries = Array.from(
     new Set(

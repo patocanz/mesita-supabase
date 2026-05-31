@@ -14,7 +14,7 @@
 // Deploy: supabase functions deploy consumer-list-reservations
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { clampIntRange, corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import { adminClient, getAuthedUser, readEFEnv } from "../_shared/auth.ts";
 
 const DEFAULT_LIMIT = 50;
@@ -38,15 +38,11 @@ Deno.serve(async (req) => {
   let limit = DEFAULT_LIMIT;
   let scope: Scope = "upcoming";
   if (req.method === "POST") {
-    try {
-      const body = (await req.json()) as Body;
-      if (typeof body?.limit === "number") {
-        limit = Math.max(1, Math.min(MAX_LIMIT, Math.trunc(body.limit)));
-      }
-      if (body?.scope === "past" || body?.scope === "all") scope = body.scope;
-    } catch {
-      // empty body
+    const body = await readJsonOr<Body>(req, {});
+    if (typeof body.limit === "number") {
+      limit = clampIntRange(body.limit, 1, MAX_LIMIT);
     }
+    if (body.scope === "past" || body.scope === "all") scope = body.scope;
   }
 
   const admin = adminClient(envRes.env);

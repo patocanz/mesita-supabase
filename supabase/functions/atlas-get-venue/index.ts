@@ -12,7 +12,7 @@
 // Deploy: supabase functions deploy atlas-get-venue
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { readEFEnv } from "../_shared/auth.ts";
 import { requireInternalCaller } from "../_shared/internal.ts";
 import {
@@ -76,12 +76,9 @@ Deno.serve(async (req) => {
   if (!keyRes.ok) return keyRes.response;
   const apiKey = keyRes.key;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" });
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const placeId = (body.placeId ?? "").toString();
   const sessionToken = (body.sessionToken ?? "").toString();

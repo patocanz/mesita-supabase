@@ -7,7 +7,7 @@
 // enough — we don't enforce which venue here because lookup is global.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -25,12 +25,9 @@ Deno.serve(async (req) => {
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
   const code = (body.code ?? "").toString().trim().toUpperCase();
   if (code.length < 4 || code.length > 12) {
     return json({ ok: false, error: "Code must be 4-12 characters" }, 400);

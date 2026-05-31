@@ -12,7 +12,7 @@
 // bodies, so meaningful errors travel in the body, not the HTTP status.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   checkSuperAdmin,
@@ -46,12 +46,9 @@ Deno.serve(async (req) => {
     return json({ ok: false, code: "unauthorized", error: "Not a super-admin" });
   }
 
-  let body: RequestBody = {};
-  try {
-    body = (await req.json()) as RequestBody;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" });
-  }
+  const bodyRes = await readJson<RequestBody>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const result = await invokeArtificialCaller(
     env,

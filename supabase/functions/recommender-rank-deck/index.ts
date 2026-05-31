@@ -21,7 +21,7 @@
 // Deploy:    supabase functions deploy recommender-rank-deck
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import { adminClient, readEFEnv } from "../_shared/auth.ts";
 import { requireInternalCaller } from "../_shared/internal.ts";
 import {
@@ -92,12 +92,7 @@ Deno.serve(async (req) => {
 
   const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    /* empty body is valid — anonymous browse */
-  }
+  const body = await readJsonOr<Body>(req, {});
   const lat = typeof body.lat === "number" && Number.isFinite(body.lat) ? body.lat : null;
   const lng = typeof body.lng === "number" && Number.isFinite(body.lng) ? body.lng : null;
   const radiusKm = clampPositive(body.radiusKm, DEFAULT_RADIUS_KM, 200);

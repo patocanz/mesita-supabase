@@ -32,7 +32,7 @@
 // Auth: any signed-in user.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -87,12 +87,9 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const userId = authRes.user.id;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
   const placeId = (body.placeId ?? "").trim();
   if (!placeId) return json({ ok: false, error: "placeId is required" }, 400);
 

@@ -15,7 +15,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { readEFEnv } from "../_shared/auth.ts";
 import { invokeArtificialCaller } from "../_shared/internal.ts";
 
@@ -29,12 +29,9 @@ Deno.serve(async (req) => {
   if (!envRes.ok) return envRes.response;
   const env = envRes.env;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" });
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   // Resolve caller user id from the bearer (if present). The atlas caller
   // uses this to mark verified_partner_self vs _other on Mesita-side

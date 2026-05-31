@@ -13,7 +13,7 @@
 // Deploy: supabase functions deploy business-delete-unit
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -34,12 +34,9 @@ Deno.serve(async (req) => {
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
 
-  let body: DeleteBody = {};
-  try {
-    body = (await req.json()) as DeleteBody;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<DeleteBody>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
   const venueId = (body.id ?? "").toString().trim();
   if (!venueId) return json({ ok: false, error: "id is required" }, 400);
 

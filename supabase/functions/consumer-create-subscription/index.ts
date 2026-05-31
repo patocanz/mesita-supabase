@@ -19,7 +19,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import Stripe from "npm:stripe@17";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import { adminClient, getAuthedUser, readEFEnv } from "../_shared/auth.ts";
 import { getTierConfig } from "../_shared/membership.ts";
 
@@ -39,12 +39,7 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const consumerId = authRes.user.id;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    /* body optional */
-  }
+  const body = await readJsonOr<Body>(req, {});
 
   const admin = adminClient(envRes.env);
   const premium = await getTierConfig(admin, "premium");

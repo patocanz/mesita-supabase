@@ -13,7 +13,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { type SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   checkMembership,
@@ -34,8 +34,7 @@ Deno.serve(async (req) => {
   const authRes = await getAuthedUser(req, envRes.env);
   if (!authRes.ok) return authRes.response;
 
-  let body: Body = {};
-  try { body = (await req.json()) as Body; } catch { /* empty */ }
+  const body = await readJsonOr<Body>(req, {});
   const id = (body.id ?? "").trim();
   const kind = body.kind;
   if (!id) return json({ ok: false, error: "id is required" }, 400);

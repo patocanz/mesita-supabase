@@ -16,7 +16,7 @@
 // Auth: caller's JWT email must be in public.super_admins.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -45,12 +45,7 @@ Deno.serve(async (req) => {
   const saRes = await requireSuperAdmin(admin, authRes.user);
   if (!saRes.ok) return saRes.response;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    // empty body fine
-  }
+  const body = await readJsonOr<Body>(req, {});
   const limit = Math.min(200, Math.max(1, body.limit ?? 100));
 
   let query = admin

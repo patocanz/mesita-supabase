@@ -5,7 +5,7 @@
 // own JWT verification, own DB read; never calls another Edge Function.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { clampIntRange, corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -29,13 +29,9 @@ Deno.serve(async (req) => {
 
   let limit = DEFAULT_LIMIT;
   if (req.method === "POST") {
-    try {
-      const body = (await req.json()) as { limit?: number };
-      if (typeof body?.limit === "number") {
-        limit = Math.max(1, Math.min(MAX_LIMIT, Math.trunc(body.limit)));
-      }
-    } catch {
-      // empty / non-JSON body — keep default
+    const body = await readJsonOr<{ limit?: number }>(req, {});
+    if (typeof body.limit === "number") {
+      limit = clampIntRange(body.limit, 1, MAX_LIMIT);
     }
   }
 

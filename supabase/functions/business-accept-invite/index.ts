@@ -13,7 +13,7 @@
 //   5. Stamp app_metadata.role = 'business' so future JWTs carry it.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -32,8 +32,7 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const user = authRes.user;
 
-  let body: Body = {};
-  try { body = (await req.json()) as Body; } catch { /* empty */ }
+  const body = await readJsonOr<Body>(req, {});
   const token = (body.token ?? "").toString().trim();
   if (!token) return json({ ok: false, error: "Missing invite token" }, 400);
 

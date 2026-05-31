@@ -9,7 +9,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { VENUE_PUBLIC_COLUMNS as VENUE_COLUMNS } from "../_shared/venue-columns.ts";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -26,12 +26,9 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "Server misconfigured" }, 500);
   }
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const idOrSlug = (body.id ?? body.slug ?? "").toString().trim();
   if (!idOrSlug) {

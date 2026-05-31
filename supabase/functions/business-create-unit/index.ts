@@ -11,7 +11,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { isOnDomain } from "../_shared/onboarding.ts";
 import { invokeArtificialCaller } from "../_shared/internal.ts";
 import { classifyLinks } from "../_shared/channels.ts";
@@ -164,13 +164,9 @@ Deno.serve(async (req) => {
   const userEmail = userData.user.email ?? null;
 
   // Parse input.
-  let body: EnrichBody = {};
-  try {
-    body = (await req.json()) as EnrichBody;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
-  const placeId = (body.placeId ?? "").toString().trim();
+  const bodyRes = await readJson<EnrichBody>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const placeId = (bodyRes.body.placeId ?? "").toString().trim();
   if (!placeId) return json({ ok: false, error: "placeId is required" }, 400);
 
   // ── Pre-flight dedupe ────────────────────────────────────────────────

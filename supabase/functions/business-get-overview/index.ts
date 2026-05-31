@@ -10,7 +10,7 @@
 // never calls another Edge Function.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import {
   adminClient,
   checkSuperAdmin,
@@ -38,12 +38,7 @@ Deno.serve(async (req) => {
   const admin = adminClient(envRes.env);
   const isSuperAdmin = await checkSuperAdmin(admin, authRes.user);
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    // empty body is fine — defaults below
-  }
+  const body = await readJsonOr<Body>(req, {});
   const requestedUnitId = (body.activeUnitId ?? "").toString().trim() || null;
   // 0 means "don't fetch tickets at all" — the sidebar layout doesn't need
   // them, only the active page does.

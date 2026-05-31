@@ -14,7 +14,7 @@
 // Response: { ok: true, tier: "free"|"premium", followers: number }
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { adminClient, getAuthedUser, readEFEnv } from "../_shared/auth.ts";
 import { getTierConfig } from "../_shared/membership.ts";
 
@@ -32,12 +32,9 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const consumerId = authRes.user.id;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const followers = Math.trunc(Number(body.followers));
   if (!Number.isFinite(followers) || followers < 0) {

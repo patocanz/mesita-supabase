@@ -14,7 +14,7 @@
 // Deploy: supabase functions deploy consumer-save-venue
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { adminClient, getAuthedUser, readEFEnv } from "../_shared/auth.ts";
 
 type Body = {
@@ -34,12 +34,9 @@ Deno.serve(async (req) => {
   if (!authRes.ok) return authRes.response;
   const consumerId = authRes.user.id;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   if (!body.venue_id || typeof body.venue_id !== "string") {
     return json({ ok: false, error: "venue_id required" }, 400);

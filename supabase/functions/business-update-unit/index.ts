@@ -9,7 +9,7 @@
 // Deploy: supabase functions deploy business-update-unit
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   checkSuperAdmin,
@@ -169,12 +169,9 @@ Deno.serve(async (req) => {
   const isSuperAdmin = await checkSuperAdmin(admin, authRes.user);
 
   // Parse + validate.
-  let body: UpdateBody = {};
-  try {
-    body = (await req.json()) as UpdateBody;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<UpdateBody>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
   const venueId = (body.id ?? "").toString().trim();
   if (!venueId) return json({ ok: false, error: "id is required" }, 400);
 

@@ -30,7 +30,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { adminClient, readEFEnv } from "../_shared/auth.ts";
 import { requireInternalCaller } from "../_shared/internal.ts";
 import {
@@ -223,12 +223,9 @@ Deno.serve(async (req) => {
   const callerRes = requireInternalCaller(req, envRes.env);
   if (!callerRes.ok) return callerRes.response;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
   const venueId = (body.venue_id ?? "").toString().trim();
   if (!venueId) return json({ ok: false, error: "venue_id is required" }, 400);
 

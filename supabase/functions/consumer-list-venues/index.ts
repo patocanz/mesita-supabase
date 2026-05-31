@@ -8,7 +8,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { clampIntRange, corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import { VENUE_PUBLIC_COLUMNS } from "../_shared/venue-columns.ts";
 
 const DEFAULT_LIMIT = 50;
@@ -37,17 +37,13 @@ Deno.serve(async (req) => {
   // a query string (?limit=… for raw GETs). Body wins if both are present.
   let limit = DEFAULT_LIMIT;
   if (req.method === "POST") {
-    try {
-      const body = (await req.json()) as ListBody;
-      if (typeof body?.limit === "number") {
-        limit = clampLimit(body.limit);
-      }
-    } catch {
-      // empty / non-JSON body — fall through to default
+    const body = await readJsonOr<ListBody>(req, {});
+    if (typeof body.limit === "number") {
+      limit = clampIntRange(body.limit, 1, MAX_LIMIT);
     }
   } else {
     const q = Number(new URL(req.url).searchParams.get("limit"));
-    if (Number.isFinite(q)) limit = clampLimit(q);
+    if (Number.isFinite(q)) limit = clampIntRange(q, 1, MAX_LIMIT);
   }
 
   const { data, error } = await supabase
@@ -62,7 +58,3 @@ Deno.serve(async (req) => {
 
   return json({ ok: true, venues: data ?? [] });
 });
-
-function clampLimit(n: number): number {
-  return Math.max(1, Math.min(MAX_LIMIT, Math.trunc(n)));
-}

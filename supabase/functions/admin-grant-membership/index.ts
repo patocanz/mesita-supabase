@@ -10,7 +10,7 @@
 // Response: { ok: true, consumer: { id, code, tier_key, tier_origin } }
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import {
   adminClient,
   getAuthedUser,
@@ -40,12 +40,9 @@ Deno.serve(async (req) => {
   const guard = await requireSuperAdmin(admin, authRes.user);
   if (!guard.ok) return guard.response;
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    return json({ ok: false, error: "Invalid JSON" }, 400);
-  }
+  const bodyRes = await readJson<Body>(req);
+  if (!bodyRes.ok) return bodyRes.response;
+  const body = bodyRes.body;
 
   const tier = body.tier ?? "premium";
   if (tier !== "free" && tier !== "premium") {

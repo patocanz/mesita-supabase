@@ -11,7 +11,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsPreflight, json } from "../_shared/http.ts";
+import { corsPreflight, json, readJsonOr } from "../_shared/http.ts";
 import { readEFEnv } from "../_shared/auth.ts";
 import { invokeArtificialCaller } from "../_shared/internal.ts";
 
@@ -61,12 +61,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  let body: Body = {};
-  try {
-    body = (await req.json()) as Body;
-  } catch {
-    /* empty body valid */
-  }
+  const body = await readJsonOr<Body>(req, {});
 
   const ranked = await invokeArtificialCaller<{
     ok: boolean;
