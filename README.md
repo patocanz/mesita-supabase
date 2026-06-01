@@ -23,7 +23,7 @@ supabase/
 │   ├── consumer-*/          # B2C diner flows
 │   ├── business-*/          # B2B venue business flows
 │   └── staff-*/             # WhatsApp validator (waiter) post-invite flow
-├── migrations/              # Versioned SQL migrations (0001 … 0026)
+├── migrations/              # Versioned SQL migrations (ordered by filename prefix)
 └── seed.sql                 # Idempotent local seed
 ```
 
