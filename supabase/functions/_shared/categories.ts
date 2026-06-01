@@ -47,10 +47,13 @@ export async function fetchVenueCategories(
 }
 
 // Picks the single best-matching category slug for a venue from the live list.
-// Returns null when there's no OpenAI key, no categories, the model errors, or
-// the model's answer isn't one of the canonical slugs — callers then keep
-// their existing fallback. The category list is passed in (the caller reads it
-// once) so a single run never hits the table twice.
+// Returns null when there's no OpenAI key, no categories, or the model errors.
+// The model is instructed to ALWAYS return the closest slug from the provided
+// list (never free text, never null). We still validate against the live slug
+// set and attempt a tolerant salvage by matching returned labels to slugs.
+//
+// The category list is passed in (the caller reads it once) so a single run
+// never hits the table twice.
 export async function inferVenueCategory(
   openaiKey: string | undefined,
   categories: VenueCategory[],
@@ -58,6 +61,9 @@ export async function inferVenueCategory(
 ): Promise<string | null> {
   if (!openaiKey || categories.length === 0) return null;
   const valid = new Set(categories.map((c) => c.slug));
+  const labelToSlug = new Map(
+    categories.map((c) => [normaliseCategoryToken(c.label), c.slug] as const),
+  );
 
   const catalog = categories
     .map((c) => `${c.slug} — ${c.label} [${c.section}]`)
@@ -82,12 +88,13 @@ export async function inferVenueCategory(
   const systemContent =
     "You classify a venue into EXACTLY ONE category from a fixed list. " +
     'Respond with a single JSON object {"category":"<slug>"} where <slug> is ' +
-    "copied verbatim from the list. Choose the most specific category that " +
-    "fits the venue's main offering. If nothing fits, return null.";
+    "copied verbatim from the list. Choose the MOST SIMILAR and most specific " +
+    "category for the venue's main offering. Always return one slug from the " +
+    "list, even when uncertain.";
   const userPrompt =
     `Categories (slug — label [section]):\n${catalog}\n\n` +
     `Venue:\n${venueLines}\n\n` +
-    `Return {"category":"<one slug from the list, or null>"}.`;
+    `Return {"category":"<one slug from the list>"}.`;
 
   try {
     const r = await fetch(OPENAI_URL, {
@@ -117,9 +124,25 @@ export async function inferVenueCategory(
     } catch {
       return null;
     }
-    const slug = typeof parsed.category === "string" ? parsed.category.trim() : "";
-    return valid.has(slug) ? slug : null;
+    const raw = typeof parsed.category === "string" ? parsed.category.trim() : "";
+    if (!raw) return null;
+    if (valid.has(raw)) return raw;
+
+    // Tolerant salvage: model occasionally emits the human label instead of the
+    // slug. Normalise and map label -> slug.
+    const byLabel = labelToSlug.get(normaliseCategoryToken(raw));
+    if (byLabel && valid.has(byLabel)) return byLabel;
+    return null;
   } catch {
     return null;
   }
+}
+
+function normaliseCategoryToken(v: string): string {
+  return v
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }

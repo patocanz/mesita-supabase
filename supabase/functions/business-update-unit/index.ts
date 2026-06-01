@@ -18,6 +18,10 @@ import {
 } from "../_shared/auth.ts";
 import { isEmailish } from "../_shared/input.ts";
 import { VENUE_BUSINESS_COLUMNS } from "../_shared/venue-columns.ts";
+import {
+  inferVenueCategory,
+  type VenueCategory,
+} from "../_shared/categories.ts";
 
 const MAX_PHOTOS = 30;
 const MAX_TAGS = 12;
@@ -159,6 +163,7 @@ const VALID_PLANS = new Set([
   "informal_pro",
   "informal_ultra",
 ]);
+const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -208,7 +213,7 @@ Deno.serve(async (req) => {
     update.name = n;
   }
   if ("category" in body) {
-    const resolved = await resolveCategoryInput(admin, body.category);
+    const resolved = await resolveCategoryInput(admin, body.category, OPENAI_KEY);
     if (!resolved.ok) {
       return json({ ok: false, error: resolved.error }, 400);
     }
@@ -486,12 +491,28 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: "No editable fields provided" }, 400);
   }
 
-  const { data: venue, error: updateError } = await admin
+  let { data: venue, error: updateError } = await admin
     .from("venues")
     .update(update)
     .eq("id", venueId)
     .select(VENUE_BUSINESS_COLUMNS)
     .single();
+
+  // Backward compatibility: in projects where category_label migration hasn't
+  // landed (or schema cache is stale), retry the same update without
+  // category_label so edits can still be saved.
+  if (updateError && isMissingCategoryLabelColumnError(updateError) && "category_label" in update) {
+    const retryUpdate = { ...update };
+    delete retryUpdate.category_label;
+    const retry = await admin
+      .from("venues")
+      .update(retryUpdate)
+      .eq("id", venueId)
+      .select(VENUE_BUSINESS_COLUMNS)
+      .single();
+    venue = retry.data;
+    updateError = retry.error;
+  }
   if (updateError) {
     return json(
       { ok: false, error: `venue_update: ${updateError.message}`, code: updateError.code ?? null },
@@ -505,6 +526,7 @@ Deno.serve(async (req) => {
 async function resolveCategoryInput(
   admin: ReturnType<typeof adminClient>,
   input: unknown,
+  openaiKey: string | undefined,
 ): Promise<
   | { ok: true; slug: string | null; label: string | null }
   | { ok: false; error: string }
@@ -519,18 +541,38 @@ async function resolveCategoryInput(
   if (error) {
     return { ok: false, error: `category_lookup: ${error.message}` };
   }
+  const categories = (data ?? []) as VenueCategory[];
   const needle = raw.trim().toLowerCase();
-  const hit = (data ?? []).find(
+  const hit = categories.find(
     (c) => c.slug.toLowerCase() === needle || c.label.toLowerCase() === needle,
   );
-  if (!hit) {
-    return {
-      ok: false,
-      error:
-        "category must match a known category key or friendly label from venue_categories.",
-    };
+  if (hit) return { ok: true, slug: hit.slug, label: hit.label };
+
+  // NLP fallback: map free-form/Google category text to the closest Mesita
+  // category slug instead of requiring exact text equality.
+  const inferredSlug = await inferVenueCategory(openaiKey, categories, {
+    name: raw,
+    googlePrimaryType: raw,
+    googlePrimaryTypeDisplay: raw,
+  });
+  if (inferredSlug) {
+    const inferredHit = categories.find((c) => c.slug === inferredSlug);
+    if (inferredHit) return { ok: true, slug: inferredHit.slug, label: inferredHit.label };
   }
-  return { ok: true, slug: hit.slug, label: hit.label };
+
+  return {
+    ok: false,
+    error:
+      "category could not be mapped to a Mesita category. Try a clearer category name.",
+  };
+}
+
+function isMissingCategoryLabelColumnError(err: { message?: string } | null): boolean {
+  if (!err?.message) return false;
+  return (
+    err.message.includes("category_label") &&
+    (err.message.includes("schema cache") || err.message.includes("column"))
+  );
 }
 
 function optString(v: unknown, maxLen: number): string | null {

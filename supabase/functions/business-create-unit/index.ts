@@ -461,11 +461,25 @@ Deno.serve(async (req) => {
     instagram_followers_count: instagramFollowers,
   };
 
-  const { data: venue, error: venueError } = await admin
+  let { data: venue, error: venueError } = await admin
     .from("venues")
     .insert(insertRow)
     .select("id, slug, name, status")
     .single();
+
+  // Backward compatibility: some remote projects may still be warming schema
+  // cache or missing the category_label column migration. Retry without that
+  // field so venue creation remains available.
+  if (venueError && isMissingCategoryLabelColumnError(venueError)) {
+    const { category_label: _ignored, ...legacyInsertRow } = insertRow;
+    const retry = await admin
+      .from("venues")
+      .insert(legacyInsertRow)
+      .select("id, slug, name, status")
+      .single();
+    venue = retry.data;
+    venueError = retry.error;
+  }
   if (venueError) {
     // Unique-violation on google_place_id → already onboarded by someone.
     if (venueError.code === "23505" && /google_place_id/.test(venueError.message)) {
@@ -579,6 +593,14 @@ function mapGoogleReviews(
     }))
     .filter((r) => r.quote.length > 0);
   return mapped.length > 0 ? mapped : null;
+}
+
+function isMissingCategoryLabelColumnError(err: { message?: string } | null): boolean {
+  if (!err?.message) return false;
+  return (
+    err.message.includes("category_label") &&
+    (err.message.includes("schema cache") || err.message.includes("column"))
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
