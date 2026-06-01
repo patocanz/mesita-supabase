@@ -29,7 +29,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import type { SupabaseClient } from "jsr:@supabase/supabase-js@2";
 import { corsPreflight, json, readJson } from "../_shared/http.ts";
 import { adminClient, readEFEnv } from "../_shared/auth.ts";
-import { requireInternalCaller } from "../_shared/internal.ts";
+import { invokeArtificialCaller, requireInternalCaller } from "../_shared/internal.ts";
 import {
   APIFY_ACTORS,
   instagramHandleFromUrl,
@@ -82,10 +82,6 @@ const RESERVATION_DELIVERY_TIER = 3;
 // Safety ceiling on the gathered candidate pool before save (the real,
 // source-independent save cap is atlas_save_total_images, applied at the end).
 const PHOTO_CEILING = 50;
-
-// Public bucket where ephemeral source images (Instagram, website) are
-// re-hosted so the gallery survives the source URL expiring / hotlink-blocking.
-const IMAGE_BUCKET = "venue-images";
 
 // Rough per-call cost estimates (USD). Approximate but enough to make the
 // per-run cap meaningful — it's a safety valve, not billing.
@@ -209,6 +205,14 @@ type ProfileResult = {
 // One photo candidate + which source it came from (drives the per-source
 // analyze caps in the funnel).
 type Img = { url: string; source: "google" | "website" | "instagram" };
+type MediaAssetPayload = {
+  source: Img["source"];
+  source_url: string;
+  likes_count?: number | null;
+  caption?: string | null;
+  analysis?: string | null;
+  source_metadata?: Record<string, unknown> | null;
+};
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return corsPreflight();
@@ -466,6 +470,11 @@ Deno.serve(async (req) => {
   let googleImages: string[] = [];
   let websiteImages: string[] = [];
   let instagramImages: string[] = [];
+  const instagramAssetMeta = new Map<
+    string,
+    { likes_count: number | null; caption: string | null; source_metadata: Record<string, unknown> }
+  >();
+  const websiteAssetMeta = new Map<string, Record<string, unknown>>();
   // Only set once the scraped IG profile verifies as THIS venue's account.
   let verifiedInstagramUrl: string | null = null;
 
@@ -591,7 +600,7 @@ Deno.serve(async (req) => {
         const posts = Array.isArray(p.latestPosts)
           ? (p.latestPosts as Record<string, unknown>[])
           : [];
-        instagramImages = posts
+        const orderedPosts = posts
           // Videos are kept: their `displayUrl` is the cover frame, so we
           // analyze it as a photo rather than dropping the post.
           .filter(
@@ -600,8 +609,24 @@ Deno.serve(async (req) => {
               (po.displayUrl as string).startsWith("http"),
           )
           .sort((a, b) => (numOf(b.likesCount) ?? 0) - (numOf(a.likesCount) ?? 0))
-          .slice(0, gatherInstagramPosts)
-          .map((po) => po.displayUrl as string);
+          .slice(0, gatherInstagramPosts);
+        instagramImages = orderedPosts.map((po) => po.displayUrl as string);
+        for (const po of orderedPosts) {
+          const url = po.displayUrl as string;
+          instagramAssetMeta.set(url, {
+            likes_count: numOf(po.likesCount),
+            caption: typeof po.caption === "string" ? po.caption : null,
+            source_metadata: {
+              comments_count: numOf(po.commentsCount),
+              is_video: !!po.isVideo,
+              shortcode: typeof po.shortCode === "string" ? po.shortCode : null,
+              timestamp:
+                typeof po.timestamp === "string" || typeof po.timestamp === "number"
+                  ? po.timestamp
+                  : null,
+            },
+          });
+        }
         sources.apify_instagram = {
           handle: chosen.handle,
           ok: true,
@@ -684,6 +709,14 @@ Deno.serve(async (req) => {
 
         const ranked = await rankWebsiteImagesByRelevance(OPENAI_KEY, candidates);
         websiteImages = ranked.slice(0, gatherWebsiteImages);
+        for (const c of candidates) {
+          websiteAssetMeta.set(c.url, {
+            alt: c.alt || null,
+            width: c.width ?? null,
+            height: c.height ?? null,
+            page: c.page,
+          });
+        }
         sources.firecrawl = {
           ok: !!siteMarkdown,
           pages: 1 + extraPages.length,
@@ -709,24 +742,6 @@ Deno.serve(async (req) => {
     update.instagram_url = verifiedInstagramUrl;
   }
 
-  // ── Re-host ephemeral images (durable gallery) ───────────────────────────
-  // Instagram CDN URLs expire (signed) and some website images hotlink-block;
-  // download + re-upload them to the public venue-images bucket so the gallery
-  // survives. Best-effort per image — a failed mirror keeps the original URL.
-  // Already-mirrored URLs are skipped inside the helper.
-  // Google's lh3 photo URLs are stable, so they're left direct.
-  const mirrorBefore = instagramImages.length + websiteImages.length;
-  if (mirrorBefore > 0) {
-    [instagramImages, websiteImages] = await Promise.all([
-      mirrorImages(admin, envRes.env.url, venueId, instagramImages, "ig"),
-      mirrorImages(admin, envRes.env.url, venueId, websiteImages, "web"),
-    ]);
-    const mirrored = [...instagramImages, ...websiteImages].filter((u) =>
-      u.includes(`/${IMAGE_BUCKET}/`)
-    ).length;
-    sources.image_mirror = { candidates: mirrorBefore, mirrored };
-  }
-
   // ── Image funnel: build the gathered pool (post metadata-sort) ───────────
   // Each source contributes its gather-capped, metadata-sorted bucket (Google
   // in Google's order, Website by size, Instagram by likes). business-create-
@@ -738,6 +753,7 @@ Deno.serve(async (req) => {
     gatherGoogleImages,
   );
   const saved: Img[] = [];
+  const imageAnalysisByUrl = new Map<string, string>();
   const savedSeen = new Set<string>();
   const pushImg = (url: string, source: Img["source"]) => {
     if (!url || savedSeen.has(url) || saved.length >= PHOTO_CEILING) return;
@@ -786,6 +802,10 @@ Deno.serve(async (req) => {
       );
       let order: number[] | null = null;
       if (descriptions) {
+        for (let i = 0; i < descriptions.length; i += 1) {
+          const desc = descriptions[i];
+          if (desc && toAnalyze[i]?.url) imageAnalysisByUrl.set(toAnalyze[i].url, desc);
+        }
         order = await textSortImages(OPENAI_KEY!, descriptions, imageSortingPrompt);
       }
       if (order && order.length > 0) {
@@ -965,6 +985,44 @@ Deno.serve(async (req) => {
     return json({ ok: false, error: `venue_update: ${updErr.message}` }, 500);
   }
 
+  // Queue media persistence asynchronously: keep source URLs in the runtime
+  // response for speed, then mirror + metadata-save in background.
+  const mediaAssets: MediaAssetPayload[] = saved.map((img) => {
+    const ig = instagramAssetMeta.get(img.url);
+    const web = websiteAssetMeta.get(img.url);
+    return {
+      source: img.source,
+      source_url: img.url,
+      likes_count: ig?.likes_count ?? null,
+      caption: ig?.caption ?? null,
+      analysis: imageAnalysisByUrl.get(img.url) ?? null,
+      source_metadata: ig?.source_metadata ?? web ?? null,
+    };
+  });
+  let mediaAsync: Record<string, unknown> = { queued: false, assets: mediaAssets.length };
+  if (mediaAssets.length > 0) {
+    const mediaRes = await invokeArtificialCaller(
+      envRes.env,
+      "atlas-enrich-profile",
+      "atlas-save-venue-media",
+      {
+        venue_id: venueId,
+        assets: mediaAssets,
+        preferred_photo_urls: finalPhotos,
+      },
+    );
+    if (mediaRes.ok) {
+      mediaAsync = { queued: true, assets: mediaAssets.length };
+    } else {
+      mediaAsync = {
+        queued: false,
+        assets: mediaAssets.length,
+        error: mediaRes.error,
+        status: mediaRes.status,
+      };
+    }
+  }
+
   return json({
     ok: true,
     venue_id: venueId,
@@ -972,6 +1030,7 @@ Deno.serve(async (req) => {
     fields_filled: Object.keys(update).filter(
       (k) => k !== "enriched_at" && k !== "enrichment_sources",
     ),
+    media_async: mediaAsync,
     caller: callerRes.callerName,
   });
 });
@@ -1249,58 +1308,6 @@ async function textSortImages(
   } catch {
     return null;
   }
-}
-
-// Download each image and re-upload to the public venue-images bucket, so the
-// gallery survives the source URL expiring. Best-effort per image: any failure
-// (bad fetch, non-image, too big, upload error) falls back to the original URL.
-// URLs already hosted in our bucket are passed through untouched.
-async function mirrorImages(
-  admin: SupabaseClient,
-  supabaseUrl: string,
-  venueId: string,
-  urls: string[],
-  prefix: string,
-): Promise<string[]> {
-  if (urls.length === 0) return urls;
-  // Bucket is provisioned by migration 0057 — no per-run create needed.
-  const publicPath = `/storage/v1/object/public/${IMAGE_BUCKET}/`;
-  return await Promise.all(
-    urls.map(async (url, i) => {
-      if (typeof url !== "string" || !url) return url;
-      if (url.includes(publicPath)) return url; // already mirrored
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 15000);
-        let r: Response;
-        try {
-          r = await fetch(url, { signal: ctrl.signal });
-        } finally {
-          clearTimeout(timer);
-        }
-        if (!r.ok) return url;
-        const ct = r.headers.get("content-type") ?? "image/jpeg";
-        if (!ct.startsWith("image/")) return url;
-        const bytes = new Uint8Array(await r.arrayBuffer());
-        if (bytes.byteLength === 0 || bytes.byteLength > 8_000_000) return url;
-        const ext = ct.includes("png")
-          ? "png"
-          : ct.includes("webp")
-            ? "webp"
-            : ct.includes("avif")
-              ? "avif"
-              : "jpg";
-        const path = `${venueId}/${prefix}-${i}.${ext}`;
-        const { error } = await admin.storage
-          .from(IMAGE_BUCKET)
-          .upload(path, bytes, { contentType: ct, upsert: true });
-        if (error) return url;
-        return `${supabaseUrl}${publicPath}${path}`;
-      } catch {
-        return url;
-      }
-    }),
-  );
 }
 
 // ── Discovery + parsing helpers ─────────────────────────────────────────────

@@ -178,6 +178,11 @@ verify_jwt = false
 [functions.atlas-enrich-profile]
 verify_jwt = false
 
+# Async media persistence worker — stores source metadata immediately and mirrors
+# source images to Supabase Storage in background. Internal-only.
+[functions.atlas-save-venue-media]
+verify_jwt = false
+
 # Authed consumer writes / reads tied to the signed-in consumer's own data.
 [functions.consumer-get-profile]
 verify_jwt = true
