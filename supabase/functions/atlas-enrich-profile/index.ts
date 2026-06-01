@@ -37,6 +37,7 @@ import {
 } from "../_shared/apify.ts";
 import { firecrawlScrape, firecrawlSearch } from "../_shared/firecrawl.ts";
 import {
+  canonicaliseUrl,
   domainOf,
   facebookPageFromUrl,
   pickChannel,
@@ -381,6 +382,7 @@ Deno.serve(async (req) => {
     sources.discovery = {
       ok: true,
       via: found.via,
+      provenance: found.provenance,
       instagram: !!resolvedInstagram,
       facebook: !!resolvedFacebook,
       website: !!resolvedWebsite,
@@ -1291,6 +1293,173 @@ type Channels = {
   website_url: string | null;
 };
 
+type DiscoveryField = "website" | "instagram" | "facebook" | "opentable" | "ubereats";
+type CandidateProvider = "google" | "seed" | "firecrawl" | "perplexity" | "website_footer";
+type CandidateSource = "existing" | "search" | "json_or_citations" | "website_footer";
+type DiscoveryCandidate = {
+  url: string;
+  field: DiscoveryField;
+  provider: CandidateProvider;
+  source: CandidateSource;
+};
+type DiscoverySelection = DiscoveryCandidate & { score: number };
+type FieldProvenance = {
+  url: string | null;
+  provider: string | null;
+  source: string | null;
+  score: number;
+  candidate_count: number;
+  fallback_used: boolean;
+  primary_path: string;
+};
+
+const PRIMARY_PATH: Record<DiscoveryField, string> = {
+  website: "google->firecrawl->perplexity(citations)",
+  instagram: "website_footer/firecrawl->perplexity(citations)",
+  facebook: "website_footer/firecrawl->perplexity(citations)",
+  opentable: "firecrawl->perplexity(citations)",
+  ubereats: "firecrawl+perplexity(citations) hybrid",
+};
+
+const PROVIDER_PRIOR: Record<DiscoveryField, Record<CandidateProvider, number>> = {
+  website: { google: 1.2, seed: 0.8, firecrawl: 0.7, perplexity: 0.45, website_footer: 0.65 },
+  instagram: { google: 1.0, seed: 0.7, firecrawl: 0.85, perplexity: 0.35, website_footer: 1.1 },
+  facebook: { google: 1.0, seed: 0.7, firecrawl: 0.75, perplexity: 0.35, website_footer: 1.0 },
+  opentable: { google: 0.6, seed: 0.7, firecrawl: 0.9, perplexity: 0.55, website_footer: 0.9 },
+  ubereats: { google: 0.55, seed: 0.7, firecrawl: 0.28, perplexity: 0.42, website_footer: 0.5 },
+};
+
+const FIELD_THRESHOLD: Record<DiscoveryField, number> = {
+  website: 0.45,
+  instagram: 0.55,
+  facebook: 0.5,
+  opentable: 0.45,
+  ubereats: 0.3,
+};
+
+type DiscoveryContext = {
+  nameTokens: string[];
+  cityTokens: string[];
+};
+
+function foldText(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "");
+}
+
+function tokenise(s: string): string[] {
+  const stop = new Set(["the", "and", "san", "de", "del", "la", "el", "los", "las", "restaurant"]);
+  return foldText(s)
+    .split(/[^a-z0-9]+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 3 && !stop.has(x));
+}
+
+function buildDiscoveryContext(name: string, city: string | null, locationLine: string): DiscoveryContext {
+  const nameTokens = tokenise(name);
+  const cityTokens = dedup([...(city ? tokenise(city) : []), ...tokenise(locationLine)]);
+  return { nameTokens, cityTokens };
+}
+
+function normaliseCandidateForField(field: DiscoveryField, rawUrl: string): string | null {
+  const canon = canonicaliseUrl(rawUrl);
+  if (!canon) return null;
+  if (field === "website") return pickWebsite([canon]);
+  if (field === "instagram") return pickInstagram([canon]);
+  if (field === "facebook") return pickFacebook([canon]);
+  if (field === "opentable") {
+    const hit = pickChannel([canon], "opentable_url");
+    if (!hit) return null;
+    try {
+      if (!new URL(hit).pathname.toLowerCase().startsWith("/r/")) return null;
+    } catch {
+      return null;
+    }
+    return hit;
+  }
+  const hit = pickChannel([canon], "uber_eats_url");
+  if (!hit) return null;
+  try {
+    if (!new URL(hit).pathname.toLowerCase().includes("/store/")) return null;
+  } catch {
+    return null;
+  }
+  return hit;
+}
+
+function addDiscoveryCandidates(
+  pool: Record<DiscoveryField, DiscoveryCandidate[]>,
+  field: DiscoveryField,
+  urls: string[],
+  provider: CandidateProvider,
+  source: CandidateSource,
+): void {
+  for (const raw of urls) {
+    const url = normaliseCandidateForField(field, raw);
+    if (!url) continue;
+    pool[field].push({ url, field, provider, source });
+  }
+}
+
+function scoreCandidate(field: DiscoveryField, c: DiscoveryCandidate, ctx: DiscoveryContext): number {
+  let score = PROVIDER_PRIOR[field][c.provider] ?? 0.1;
+  if (c.source === "website_footer") score += 1.1;
+  let u: URL | null = null;
+  try {
+    u = new URL(c.url);
+  } catch {
+    u = null;
+  }
+  const hay = foldText((u?.hostname ?? "") + (u?.pathname ?? ""));
+  let nameBoost = 0;
+  for (const t of ctx.nameTokens) {
+    if (hay.includes(t)) nameBoost += 0.13;
+  }
+  let cityBoost = 0;
+  for (const t of ctx.cityTokens) {
+    if (hay.includes(t)) cityBoost += 0.08;
+  }
+  score += Math.min(nameBoost, 0.65) + Math.min(cityBoost, 0.24);
+
+  const path = (u?.pathname ?? "").toLowerCase();
+  if (field === "facebook" && /(photos|videos|reel|story|posts|events)/.test(path)) score -= 0.4;
+  if (field === "website" && /(tripadvisor|yelp|wikipedia|guide\.michelin|theworlds50best)/.test(hay)) {
+    score -= 0.8;
+  }
+  if (field === "instagram" && path.split("/").filter(Boolean).length > 1) score -= 0.2;
+  if (field === "ubereats" && !path.includes("/store/")) score -= 1.5;
+  if (field === "opentable" && !path.startsWith("/r/")) score -= 1.5;
+  return Math.round(score * 1000) / 1000;
+}
+
+function selectBestCandidate(
+  field: DiscoveryField,
+  candidates: DiscoveryCandidate[],
+  ctx: DiscoveryContext,
+): DiscoverySelection | null {
+  if (!candidates.length) return null;
+  const bestByUrl = new Map<string, DiscoverySelection>();
+  for (const c of candidates) {
+    const score = scoreCandidate(field, c, ctx);
+    const cur = bestByUrl.get(c.url);
+    if (!cur || score > cur.score) bestByUrl.set(c.url, { ...c, score });
+  }
+  const ranked = [...bestByUrl.values()].sort((a, b) =>
+    b.score - a.score || a.url.length - b.url.length || a.url.localeCompare(b.url)
+  );
+  const top = ranked[0] ?? null;
+  if (!top) return null;
+  return top.score >= FIELD_THRESHOLD[field] ? top : null;
+}
+
+function isFallbackProvider(field: DiscoveryField, provider: CandidateProvider): boolean {
+  if (field === "website") return !["google", "firecrawl"].includes(provider);
+  if (field === "instagram" || field === "facebook") {
+    return !["google", "firecrawl", "website_footer"].includes(provider);
+  }
+  if (field === "opentable") return !["seed", "firecrawl", "website_footer"].includes(provider);
+  return !["seed", "firecrawl", "perplexity", "website_footer"].includes(provider);
+}
+
 // Resolve a venue's official channel URLs. Order (matches the Atlas catalog):
 //   1. whatever Google already gave us (passed in via `have`)
 //   2. Firecrawl Search on "<name> <city> <network>" — the strongest signal for
@@ -1320,6 +1489,7 @@ async function resolveChannels(opts: {
     opentable_url: string | null;
     uber_eats_url: string | null;
     via: Record<string, string>;
+    provenance: Record<DiscoveryField, FieldProvenance>;
   }
 > {
   let instagram = opts.have.instagram;
@@ -1334,6 +1504,81 @@ async function resolveChannels(opts: {
   if (website) via.website = "google";
   if (opentable) via.opentable = "seed";
   if (uberEats) via.ubereats = "seed";
+  const ctx = buildDiscoveryContext(opts.name, opts.city, opts.locationLine);
+  const pool: Record<DiscoveryField, DiscoveryCandidate[]> = {
+    website: [],
+    instagram: [],
+    facebook: [],
+    opentable: [],
+    ubereats: [],
+  };
+  const provenance: Record<DiscoveryField, FieldProvenance> = {
+    website: {
+      url: website,
+      provider: website ? "google" : null,
+      source: website ? "existing" : null,
+      score: website ? 1.2 : 0,
+      candidate_count: 0,
+      fallback_used: false,
+      primary_path: PRIMARY_PATH.website,
+    },
+    instagram: {
+      url: instagram,
+      provider: instagram ? "google" : null,
+      source: instagram ? "existing" : null,
+      score: instagram ? 1.0 : 0,
+      candidate_count: 0,
+      fallback_used: false,
+      primary_path: PRIMARY_PATH.instagram,
+    },
+    facebook: {
+      url: facebook,
+      provider: facebook ? "google" : null,
+      source: facebook ? "existing" : null,
+      score: facebook ? 1.0 : 0,
+      candidate_count: 0,
+      fallback_used: false,
+      primary_path: PRIMARY_PATH.facebook,
+    },
+    opentable: {
+      url: opentable,
+      provider: opentable ? "seed" : null,
+      source: opentable ? "existing" : null,
+      score: opentable ? 0.8 : 0,
+      candidate_count: 0,
+      fallback_used: false,
+      primary_path: PRIMARY_PATH.opentable,
+    },
+    ubereats: {
+      url: uberEats,
+      provider: uberEats ? "seed" : null,
+      source: uberEats ? "existing" : null,
+      score: uberEats ? 0.8 : 0,
+      candidate_count: 0,
+      fallback_used: false,
+      primary_path: PRIMARY_PATH.ubereats,
+    },
+  };
+  const applySelection = (field: DiscoveryField, sel: DiscoverySelection | null): void => {
+    provenance[field].candidate_count = pool[field].length;
+    if (!sel) return;
+    if (field === "website" && !website) website = sel.url;
+    if (field === "instagram" && !instagram) instagram = sel.url;
+    if (field === "facebook" && !facebook) facebook = sel.url;
+    if (field === "opentable" && !opentable) opentable = sel.url;
+    if (field === "ubereats" && !uberEats) uberEats = sel.url;
+    const viaKey = field === "ubereats" ? "ubereats" : field;
+    via[viaKey] = sel.provider;
+    provenance[field] = {
+      url: sel.url,
+      provider: sel.provider,
+      source: sel.source,
+      score: sel.score,
+      candidate_count: pool[field].length,
+      fallback_used: isFallbackProvider(field, sel.provider),
+      primary_path: PRIMARY_PATH[field],
+    };
+  };
 
   const scope = [opts.name, opts.category ?? "", opts.city ?? ""]
     .map((s) => s.trim())
@@ -1381,44 +1626,43 @@ async function resolveChannels(opts: {
       needOpenTable ? searchMany(otQueries) : Promise.resolve<string[]>([]),
       needUberEats ? searchMany(ueQueries) : Promise.resolve<string[]>([]),
     ]);
-    if (!instagram) {
-      const hit = pickInstagram(igHits);
-      if (hit) {
-        instagram = hit;
-        via.instagram = "firecrawl";
+    addDiscoveryCandidates(pool, "instagram", igHits, "firecrawl", "search");
+    addDiscoveryCandidates(pool, "facebook", fbHits, "firecrawl", "search");
+    addDiscoveryCandidates(pool, "website", webHits, "firecrawl", "search");
+    if (needOpenTable) addDiscoveryCandidates(pool, "opentable", otHits, "firecrawl", "search");
+    if (needUberEats) addDiscoveryCandidates(pool, "ubereats", ueHits, "firecrawl", "search");
+    if (!website) applySelection("website", selectBestCandidate("website", pool.website, ctx));
+
+    // Website footer links are strong social/reservation/delivery signals.
+    if (website) {
+      const home = await firecrawlScrape(key, website, {
+        formats: ["markdown"],
+        onlyMainContent: false,
+        signalTimeoutMs: 15000,
+      });
+      const links = dedup(Array.isArray(home?.links) ? home!.links : []).slice(0, 120);
+      if (links.length) {
+        if (!instagram) addDiscoveryCandidates(pool, "instagram", links, "website_footer", "website_footer");
+        if (!facebook) addDiscoveryCandidates(pool, "facebook", links, "website_footer", "website_footer");
+        if (needOpenTable && !opentable) {
+          addDiscoveryCandidates(pool, "opentable", links, "website_footer", "website_footer");
+        }
+        if (needUberEats && !uberEats) {
+          addDiscoveryCandidates(pool, "ubereats", links, "website_footer", "website_footer");
+        }
       }
     }
-    if (!facebook) {
-      const hit = pickFacebook(fbHits);
-      if (hit) {
-        facebook = hit;
-        via.facebook = "firecrawl";
-      }
+    if (!instagram) applySelection("instagram", selectBestCandidate("instagram", pool.instagram, ctx));
+    if (!facebook) applySelection("facebook", selectBestCandidate("facebook", pool.facebook, ctx));
+    if (needOpenTable && !opentable) {
+      applySelection("opentable", selectBestCandidate("opentable", pool.opentable, ctx));
     }
-    if (!website) {
-      const hit = pickWebsite(webHits);
-      if (hit) {
-        website = hit;
-        via.website = "firecrawl";
-      }
-    }
-    if (needOpenTable) {
-      const hit = pickChannel(otHits, "opentable_url");
-      if (hit) {
-        opentable = hit;
-        via.opentable = "firecrawl";
-      }
-    }
-    if (needUberEats) {
-      const hit = pickChannel(ueHits, "uber_eats_url");
-      if (hit) {
-        uberEats = hit;
-        via.ubereats = "firecrawl";
-      }
+    if (needUberEats && !uberEats && !opts.perplexityKey) {
+      applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
     }
   }
 
-  // 3. Perplexity fallback — only if something's still missing.
+  // 3. Perplexity fallback for website/socials — only if still missing.
   if (opts.perplexityKey && (!instagram || !facebook || !website)) {
     const pp = await discoverChannelsPerplexity(
       opts.perplexityKey,
@@ -1428,23 +1672,22 @@ async function resolveChannels(opts: {
     );
     if (pp) {
       if (!instagram && pp.instagram_url) {
-        instagram = pp.instagram_url;
-        via.instagram = "perplexity";
+        addDiscoveryCandidates(pool, "instagram", [pp.instagram_url], "perplexity", "json_or_citations");
       }
       if (!facebook && pp.facebook_url) {
-        facebook = pp.facebook_url;
-        via.facebook = "perplexity";
+        addDiscoveryCandidates(pool, "facebook", [pp.facebook_url], "perplexity", "json_or_citations");
       }
       if (!website && pp.website_url) {
-        website = pp.website_url;
-        via.website = "perplexity";
+        addDiscoveryCandidates(pool, "website", [pp.website_url], "perplexity", "json_or_citations");
       }
     }
+    if (!website) applySelection("website", selectBestCandidate("website", pool.website, ctx));
+    if (!instagram) applySelection("instagram", selectBestCandidate("instagram", pool.instagram, ctx));
+    if (!facebook) applySelection("facebook", selectBestCandidate("facebook", pool.facebook, ctx));
   }
 
-  // 3b. Perplexity fallback for the tier-3 directory links, mirroring the
-  // social fallback above. Separate call (distinct schema) so the social
-  // resolution above is never perturbed by it.
+  // 3b. Directory links: OpenTable gets a Perplexity fallback. UberEats always
+  // resolves from a hybrid candidate pool (Firecrawl + Perplexity) when missing.
   if (opts.perplexityKey && wantDelivery && (!opentable || !uberEats)) {
     const dd = await discoverDeliveryPerplexity(
       opts.perplexityKey,
@@ -1454,14 +1697,20 @@ async function resolveChannels(opts: {
     );
     if (dd) {
       if (!opentable && dd.opentable_url) {
-        opentable = dd.opentable_url;
-        via.opentable = "perplexity";
+        addDiscoveryCandidates(pool, "opentable", [dd.opentable_url], "perplexity", "json_or_citations");
       }
       if (!uberEats && dd.uber_eats_url) {
-        uberEats = dd.uber_eats_url;
-        via.ubereats = "perplexity";
+        addDiscoveryCandidates(pool, "ubereats", [dd.uber_eats_url], "perplexity", "json_or_citations");
       }
     }
+    if (!opentable) applySelection("opentable", selectBestCandidate("opentable", pool.opentable, ctx));
+    if (!uberEats) applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
+  } else if (wantDelivery && !uberEats) {
+    applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
+  }
+
+  for (const field of ["website", "instagram", "facebook", "opentable", "ubereats"] as DiscoveryField[]) {
+    provenance[field].candidate_count = pool[field].length;
   }
 
   return {
@@ -1471,6 +1720,7 @@ async function resolveChannels(opts: {
     opentable_url: opentable,
     uber_eats_url: uberEats,
     via,
+    provenance,
   };
 }
 
