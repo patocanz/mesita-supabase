@@ -1335,6 +1335,10 @@ type FieldProvenance = {
   score: number;
   candidate_count: number;
   fallback_used: boolean;
+  // Firecrawl and Perplexity both found candidates but pointed to different URLs.
+  eyebrow: boolean;
+  firecrawl_candidate: string | null;
+  perplexity_candidate: string | null;
   primary_path: string;
 };
 
@@ -1355,11 +1359,14 @@ const PROVIDER_PRIOR: Record<DiscoveryField, Record<CandidateProvider, number>> 
 };
 
 const FIELD_THRESHOLD: Record<DiscoveryField, number> = {
-  website: 0.45,
-  instagram: 0.55,
-  facebook: 0.5,
-  opentable: 0.45,
-  ubereats: 0.3,
+  // Tolerance policy:
+  // - stricter (less false positives): website/facebook/opentable/ubereats
+  // - softer (prefer finding a plausible handle): instagram
+  website: 0.5,
+  instagram: 0.48,
+  facebook: 0.54,
+  opentable: 0.54,
+  ubereats: 0.38,
 };
 
 type DiscoveryContext = {
@@ -1485,6 +1492,32 @@ function isFallbackProvider(field: DiscoveryField, provider: CandidateProvider):
   return !["seed", "firecrawl", "perplexity", "website_footer"].includes(provider);
 }
 
+function bestCandidateFromProvider(
+  field: DiscoveryField,
+  candidates: DiscoveryCandidate[],
+  provider: CandidateProvider,
+  ctx: DiscoveryContext,
+): DiscoverySelection | null {
+  const filtered = candidates.filter((c) => c.provider === provider);
+  if (filtered.length === 0) return null;
+  const bestByUrl = new Map<string, DiscoverySelection>();
+  for (const c of filtered) {
+    const score = scoreCandidate(field, c, ctx);
+    const cur = bestByUrl.get(c.url);
+    if (!cur || score > cur.score) bestByUrl.set(c.url, { ...c, score });
+  }
+  const ranked = [...bestByUrl.values()].sort((a, b) =>
+    b.score - a.score || a.url.length - b.url.length || a.url.localeCompare(b.url)
+  );
+  return ranked[0] ?? null;
+}
+
+function sameLink(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ca = canonicaliseUrl(a ?? "");
+  const cb = canonicaliseUrl(b ?? "");
+  return !!ca && !!cb && ca === cb;
+}
+
 // Resolve a venue's official channel URLs. Order (matches the Atlas catalog):
 //   1. whatever Google already gave us (passed in via `have`)
 //   2. Firecrawl Search on "<name> <city> <network>" — the strongest signal for
@@ -1545,6 +1578,9 @@ async function resolveChannels(opts: {
       score: website ? 1.2 : 0,
       candidate_count: 0,
       fallback_used: false,
+      eyebrow: false,
+      firecrawl_candidate: null,
+      perplexity_candidate: null,
       primary_path: PRIMARY_PATH.website,
     },
     instagram: {
@@ -1554,6 +1590,9 @@ async function resolveChannels(opts: {
       score: instagram ? 1.0 : 0,
       candidate_count: 0,
       fallback_used: false,
+      eyebrow: false,
+      firecrawl_candidate: null,
+      perplexity_candidate: null,
       primary_path: PRIMARY_PATH.instagram,
     },
     facebook: {
@@ -1563,6 +1602,9 @@ async function resolveChannels(opts: {
       score: facebook ? 1.0 : 0,
       candidate_count: 0,
       fallback_used: false,
+      eyebrow: false,
+      firecrawl_candidate: null,
+      perplexity_candidate: null,
       primary_path: PRIMARY_PATH.facebook,
     },
     opentable: {
@@ -1572,6 +1614,9 @@ async function resolveChannels(opts: {
       score: opentable ? 0.8 : 0,
       candidate_count: 0,
       fallback_used: false,
+      eyebrow: false,
+      firecrawl_candidate: null,
+      perplexity_candidate: null,
       primary_path: PRIMARY_PATH.opentable,
     },
     ubereats: {
@@ -1581,6 +1626,9 @@ async function resolveChannels(opts: {
       score: uberEats ? 0.8 : 0,
       candidate_count: 0,
       fallback_used: false,
+      eyebrow: false,
+      firecrawl_candidate: null,
+      perplexity_candidate: null,
       primary_path: PRIMARY_PATH.ubereats,
     },
   };
@@ -1601,16 +1649,20 @@ async function resolveChannels(opts: {
       score: sel.score,
       candidate_count: pool[field].length,
       fallback_used: isFallbackProvider(field, sel.provider),
+      eyebrow: provenance[field].eyebrow,
+      firecrawl_candidate: provenance[field].firecrawl_candidate,
+      perplexity_candidate: provenance[field].perplexity_candidate,
       primary_path: PRIMARY_PATH[field],
     };
   };
 
-  const scope = [opts.name, opts.category ?? "", opts.city ?? ""]
+  const scope = [opts.name, opts.city ?? ""]
     .map((s) => s.trim())
     .filter(Boolean)
     .join(" ");
 
-  // 2. Firecrawl Search — simple, broad queries to avoid false negatives.
+  // 2. Firecrawl Search — intentionally simple queries:
+  // "<venue name> <city> <channel>" (no heavy address stuffing).
   if (opts.firecrawlKey) {
     const key = opts.firecrawlKey;
     const searchMany = async (queries: string[]) => {
@@ -1618,29 +1670,25 @@ async function resolveChannels(opts: {
       return dedup(runs.flat()).slice(0, 24);
     };
     const igQueries = [
-      `${scope} oficial instagram`,
-      `${scope} official instagram`,
       `${scope} instagram`,
+      `${opts.name} instagram`,
     ];
     const fbQueries = [
-      `${scope} oficial facebook`,
-      `${scope} official facebook`,
       `${scope} facebook`,
+      `${opts.name} facebook`,
     ];
     const webQueries = [
-      `${scope} sitio oficial website`,
-      `${scope} official website`,
       `${scope} website`,
+      `${opts.name} website`,
     ];
     const otQueries = [
       `${scope} opentable`,
-      `${scope} opentable reservation`,
-      `${scope} reservaciones opentable`,
+      `${opts.name} opentable`,
     ];
     const ueQueries = [
       `${scope} uber eats`,
       `${scope} ubereats`,
-      `${scope} uber eats a domicilio`,
+      `${opts.name} uber eats`,
     ];
     const needOpenTable = wantDelivery && !opentable;
     const needUberEats = wantDelivery && !uberEats;
@@ -1687,55 +1735,80 @@ async function resolveChannels(opts: {
     }
   }
 
-  // 3. Perplexity fallback for website/socials — only if still missing.
-  if (opts.perplexityKey && (!instagram || !facebook || !website)) {
-    const pp = await discoverChannelsPerplexity(
-      opts.perplexityKey,
-      opts.name,
-      opts.locationLine,
-      opts.category,
-    );
+  // 3. Perplexity fallback/cross-check.
+  // Run socials + delivery lookups in parallel when both are needed.
+  const needPerplexityChannels =
+    !!opts.perplexityKey && (!instagram || !facebook || !website || !!opts.firecrawlKey);
+  const needPerplexityDelivery =
+    !!opts.perplexityKey && wantDelivery && (!opentable || !uberEats);
+
+  if (needPerplexityChannels || needPerplexityDelivery) {
+    const [pp, dd] = await Promise.all([
+      needPerplexityChannels
+        ? discoverChannelsPerplexity(
+            opts.perplexityKey!,
+            opts.name,
+            opts.locationLine,
+            opts.category,
+          )
+        : Promise.resolve(null),
+      needPerplexityDelivery
+        ? discoverDeliveryPerplexity(
+            opts.perplexityKey!,
+            opts.name,
+            opts.locationLine,
+            opts.category,
+          )
+        : Promise.resolve(null),
+    ]);
+
     if (pp) {
-      if (!instagram && pp.instagram_url) {
+      if (pp.instagram_url) {
         addDiscoveryCandidates(pool, "instagram", [pp.instagram_url], "perplexity", "json_or_citations");
       }
-      if (!facebook && pp.facebook_url) {
+      if (pp.facebook_url) {
         addDiscoveryCandidates(pool, "facebook", [pp.facebook_url], "perplexity", "json_or_citations");
       }
-      if (!website && pp.website_url) {
+      if (pp.website_url) {
         addDiscoveryCandidates(pool, "website", [pp.website_url], "perplexity", "json_or_citations");
       }
     }
-    if (!website) applySelection("website", selectBestCandidate("website", pool.website, ctx));
-    if (!instagram) applySelection("instagram", selectBestCandidate("instagram", pool.instagram, ctx));
-    if (!facebook) applySelection("facebook", selectBestCandidate("facebook", pool.facebook, ctx));
-  }
 
-  // 3b. Directory links: OpenTable gets a Perplexity fallback. UberEats always
-  // resolves from a hybrid candidate pool (Firecrawl + Perplexity) when missing.
-  if (opts.perplexityKey && wantDelivery && (!opentable || !uberEats)) {
-    const dd = await discoverDeliveryPerplexity(
-      opts.perplexityKey,
-      opts.name,
-      opts.locationLine,
-      opts.category,
-    );
     if (dd) {
-      if (!opentable && dd.opentable_url) {
+      if (dd.opentable_url) {
         addDiscoveryCandidates(pool, "opentable", [dd.opentable_url], "perplexity", "json_or_citations");
       }
-      if (!uberEats && dd.uber_eats_url) {
+      if (dd.uber_eats_url) {
         addDiscoveryCandidates(pool, "ubereats", [dd.uber_eats_url], "perplexity", "json_or_citations");
       }
     }
-    if (!opentable) applySelection("opentable", selectBestCandidate("opentable", pool.opentable, ctx));
-    if (!uberEats) applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
+
+    if (!website) applySelection("website", selectBestCandidate("website", pool.website, ctx));
+    if (!instagram) applySelection("instagram", selectBestCandidate("instagram", pool.instagram, ctx));
+    if (!facebook) applySelection("facebook", selectBestCandidate("facebook", pool.facebook, ctx));
+    if (wantDelivery && !opentable) {
+      applySelection("opentable", selectBestCandidate("opentable", pool.opentable, ctx));
+    }
+    if (wantDelivery && !uberEats) {
+      applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
+    }
   } else if (wantDelivery && !uberEats) {
     applySelection("ubereats", selectBestCandidate("ubereats", pool.ubereats, ctx));
   }
 
   for (const field of ["website", "instagram", "facebook", "opentable", "ubereats"] as DiscoveryField[]) {
     provenance[field].candidate_count = pool[field].length;
+    const firecrawlTop = bestCandidateFromProvider(field, pool[field], "firecrawl", ctx);
+    const perplexityTop = bestCandidateFromProvider(field, pool[field], "perplexity", ctx);
+    provenance[field].firecrawl_candidate = firecrawlTop?.url ?? null;
+    provenance[field].perplexity_candidate = perplexityTop?.url ?? null;
+    if (
+      firecrawlTop?.url &&
+      perplexityTop?.url &&
+      !sameLink(firecrawlTop.url, perplexityTop.url)
+    ) {
+      provenance[field].eyebrow = true;
+    }
   }
 
   return {
@@ -1759,20 +1832,14 @@ async function discoverChannelsPerplexity(
   category: string | null,
 ): Promise<Channels | null> {
   const prompt =
-    `Find the official online presence of the venue "${name}"` +
-    (locationLine ? ` located at ${locationLine}` : "") +
+    `Find these links for venue "${name}"` +
+    (locationLine ? ` in ${locationLine}` : "") +
     (category ? ` (category: ${category})` : "") +
-    `. Return strict JSON with the canonical URLs of its Instagram profile, ` +
-    `Facebook page, and website.\n` +
-    `- instagram_url: give your BEST candidate even if not fully certain ` +
-    `(it is independently verified afterwards). For a franchise or chain, the ` +
-    `BRAND's main profile is a valid answer. Only null if you truly find none.\n` +
-    `- facebook_url: give your BEST candidate — again, the brand's main page is ` +
-    `fine for a chain. Only null if you truly find none.\n` +
-    `- website_url: return your BEST likely official website candidate for this ` +
-    `venue (or its brand). Use null only if you truly find none. Never invent a URL.\n` +
-    `When names are ambiguous (example: "Strana"), use city/category to pick the ` +
-    `most likely match, but prefer best plausible candidate over null.`;
+    `. Return strict JSON with instagram_url, facebook_url, website_url.\n` +
+    `Confidence policy:\n` +
+    `- website_url and facebook_url: stricter (avoid false positives). If unsure, use null.\n` +
+    `- instagram_url: softer (avoid false negatives). Return best plausible official profile; null only if no good lead.\n` +
+    `Use simple web evidence and never invent URLs.`;
   try {
     const r = await fetch(PERPLEXITY_URL, {
       method: "POST",
@@ -1786,7 +1853,7 @@ async function discoverChannelsPerplexity(
           {
             role: "system",
             content:
-              "You resolve a venue's official channel URLs from web search. Output only valid JSON matching the schema. For a franchise or multi-location brand, the brand's MAIN Instagram/Facebook/website is acceptable. Return best plausible candidates; use null only when you truly cannot find one. Never fabricate a URL out of thin air.",
+              "Resolve venue URLs from web search and output only JSON matching schema. Keep website/facebook conservative (prefer null when uncertain). For Instagram, return best plausible official profile to reduce misses. Brand-level account/site is acceptable for chains. Never fabricate URLs.",
           },
           { role: "user", content: prompt },
         ],
@@ -1849,8 +1916,8 @@ async function discoverDeliveryPerplexity(
   category: string | null,
 ): Promise<{ opentable_url: string | null; uber_eats_url: string | null } | null> {
   const prompt =
-    `Find where the venue "${name}"` +
-    (locationLine ? ` located at ${locationLine}` : "") +
+    `Find reservation and delivery links for "${name}"` +
+    (locationLine ? ` in ${locationLine}` : "") +
     (category ? ` (category: ${category})` : "") +
     `. takes reservations and delivery. Return strict JSON with:\n` +
     `- opentable_url: the canonical OpenTable restaurant page (opentable.com or ` +
@@ -1858,7 +1925,7 @@ async function discoverDeliveryPerplexity(
     `location's page is best, but the brand page is acceptable. null if none.\n` +
     `- uber_eats_url: the canonical Uber Eats store page (ubereats.com). For a ` +
     `chain, the specific store is best, the brand page acceptable. null if none.\n` +
-    `Never invent a URL — use null when you truly find none.`;
+    `For both links be conservative (low false positives). If unsure, use null. Never invent a URL.`;
   try {
     const r = await fetch(PERPLEXITY_URL, {
       method: "POST",
@@ -1872,7 +1939,7 @@ async function discoverDeliveryPerplexity(
           {
             role: "system",
             content:
-              "You resolve a venue's OpenTable and Uber Eats page URLs from web search. Output only valid JSON matching the schema. The specific location's page is best; a brand/chain page is acceptable. Use null only when you truly cannot find one. Never fabricate a URL.",
+              "Resolve OpenTable and Uber Eats URLs from web search. Output only schema JSON. Be conservative: if uncertain, use null. Specific location is best; brand-level acceptable. Never fabricate URLs.",
           },
           { role: "user", content: prompt },
         ],
