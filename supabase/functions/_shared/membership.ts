@@ -17,8 +17,6 @@ export type VenueRates = {
   cashback_percent: number | null;
 };
 
-export type TierKey = "free" | "premium";
-
 export type TierConfig = {
   key: string;
   label: string;
