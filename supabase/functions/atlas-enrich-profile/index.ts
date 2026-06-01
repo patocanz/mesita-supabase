@@ -924,7 +924,12 @@ Deno.serve(async (req) => {
       null,
     description: igBio || siteMarkdown.slice(0, 1200) || null,
   });
-  if (inferredCategory) update.category = inferredCategory;
+  if (inferredCategory) {
+    update.category = inferredCategory;
+    update.category_label =
+      categoryList.find((c) => c.slug === inferredCategory)?.label ??
+      humanizeCategoryFallback(inferredCategory);
+  }
   sources.category = {
     ok: !!inferredCategory,
     slug: inferredCategory,
@@ -2053,6 +2058,14 @@ function numOf(v: unknown): number | null {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+function humanizeCategoryFallback(category: string): string {
+  return category
+    .trim()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
 function safeParseProfile(content: string): ProfileResult | null {

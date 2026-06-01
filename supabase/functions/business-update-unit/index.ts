@@ -202,7 +202,14 @@ Deno.serve(async (req) => {
     if (n.length > 120) return json({ ok: false, error: "name too long" }, 400);
     update.name = n;
   }
-  if ("category" in body) update.category = optString(body.category, 80);
+  if ("category" in body) {
+    const resolved = await resolveCategoryInput(admin, body.category);
+    if (!resolved.ok) {
+      return json({ ok: false, error: resolved.error }, 400);
+    }
+    update.category = resolved.slug;
+    update.category_label = resolved.label;
+  }
   if ("vibe" in body) update.vibe = optString(body.vibe, 80);
   if ("price_level" in body) update.price_level = body.price_level == null ? null : clampInt(body.price_level, 1, 4);
   // currency: ISO 4217 uppercase code, 3 chars. Reject anything else
@@ -460,6 +467,37 @@ Deno.serve(async (req) => {
 
   return json({ ok: true, venue });
 });
+
+async function resolveCategoryInput(
+  admin: ReturnType<typeof adminClient>,
+  input: unknown,
+): Promise<
+  | { ok: true; slug: string | null; label: string | null }
+  | { ok: false; error: string }
+> {
+  const raw = optString(input, 120);
+  if (raw == null) {
+    return { ok: true, slug: null, label: null };
+  }
+  const { data, error } = await admin
+    .from("venue_categories")
+    .select("slug, label");
+  if (error) {
+    return { ok: false, error: `category_lookup: ${error.message}` };
+  }
+  const needle = raw.trim().toLowerCase();
+  const hit = (data ?? []).find(
+    (c) => c.slug.toLowerCase() === needle || c.label.toLowerCase() === needle,
+  );
+  if (!hit) {
+    return {
+      ok: false,
+      error:
+        "category must match a known category key or friendly label from venue_categories.",
+    };
+  }
+  return { ok: true, slug: hit.slug, label: hit.label };
+}
 
 function optString(v: unknown, maxLen: number): string | null {
   if (v == null) return null;

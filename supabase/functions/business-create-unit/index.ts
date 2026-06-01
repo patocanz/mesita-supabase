@@ -356,6 +356,16 @@ Deno.serve(async (req) => {
       null,
     description: perplexity?.brief?.summary ?? null,
   });
+  const resolvedCategorySlug =
+    inferredCategory ??
+    synth.category ??
+    details.primaryTypeDisplayName?.text ??
+    details.primaryType ??
+    null;
+  const resolvedCategoryLabel = categoryLabelForSlug(
+    categoryList,
+    resolvedCategorySlug,
+  );
 
   // ── Step 4: Persist (service role; RLS allows reads only) ──
   // `admin` was already instantiated above for the pre-flight placeId
@@ -387,7 +397,9 @@ Deno.serve(async (req) => {
   const insertRow = {
     name: synth.name || venueName,
     slug,
-    category: inferredCategory ?? synth.category ?? details.primaryTypeDisplayName?.text ?? details.primaryType ?? null,
+    category: resolvedCategorySlug,
+    category_label:
+      resolvedCategoryLabel ?? humanizeCategoryFallback(resolvedCategorySlug),
     vibe: synth.vibe ?? null,
     price_level: synth.price_level ?? priceLevelFromGoogle(details.priceLevel),
     // Created venues are publicly discoverable but not yet claimed by
@@ -1268,5 +1280,26 @@ function cleanLongString(v: unknown, maxLen: number): string | null {
   const trimmed = v.trim();
   if (!trimmed) return null;
   return trimmed.slice(0, maxLen);
+}
+
+function categoryLabelForSlug(
+  categories: { slug: string; label: string }[],
+  slug: string | null,
+): string | null {
+  if (!slug) return null;
+  const trimmed = slug.trim();
+  if (!trimmed) return null;
+  const hit = categories.find((c) => c.slug === trimmed);
+  return hit?.label ?? null;
+}
+
+function humanizeCategoryFallback(category: string | null): string | null {
+  if (!category) return null;
+  const trimmed = category.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
