@@ -111,6 +111,8 @@ const COLUMNS: readonly string[] = [
   "reward_cap_cents",
   "requires_story",
   "details",
+  // Generic product payload. Menus live under products.menu.
+  "products",
   "google_reviews",
   "menus",
   "popular_times",

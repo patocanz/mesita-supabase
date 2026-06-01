@@ -138,20 +138,25 @@ const PROFILE_SCHEMA = {
         pet_friendly: { type: ["boolean", "null"] },
       },
     },
-    menus: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          name: { type: "string" },
+    products: {
+      type: "object",
+      properties: {
+        menu: {
+          type: "array",
           items: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                price: { type: ["string", "null"] },
-                description: { type: ["string", "null"] },
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              items: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    price: { type: ["string", "null"] },
+                    description: { type: ["string", "null"] },
+                  },
+                },
               },
             },
           },
@@ -196,6 +201,7 @@ type ProfileResult = {
   editorial_summary?: string | null;
   description?: string | null;
   details?: Record<string, unknown> | null;
+  products?: { menu?: unknown[] | null } | null;
   menus?: unknown[] | null;
   popular_times?: unknown[] | null;
 };
@@ -825,7 +831,7 @@ Deno.serve(async (req) => {
     (locationLine ? ` located at ${locationLine}` : "") +
     (row.category ? ` (category: ${row.category})` : "") +
     `, using ONLY the source material below. Return a single JSON object ` +
-    `matching the schema. Extract the menu from the website content when ` +
+    `matching the schema. Build products.menu from website content when ` +
     `present (real dish names + prices only). Write "description" as an ` +
     `inviting, factual 2-4 sentence venue description for the public Place ` +
     `page (max ${ATLAS_DESCRIPTION_MAX} characters), grounded in the sources. ` +
@@ -901,8 +907,15 @@ Deno.serve(async (req) => {
     if (parsed.details && typeof parsed.details === "object") {
       update.details = parsed.details;
     }
-    if (Array.isArray(parsed.menus) && parsed.menus.length > 0) {
-      update.menus = parsed.menus;
+    const productMenu = Array.isArray(parsed.products?.menu)
+      ? parsed.products?.menu
+      : Array.isArray(parsed.menus)
+        ? parsed.menus
+        : null;
+    if (productMenu && productMenu.length > 0) {
+      // Canonical storage: products.menu. Keep menus synced for compatibility.
+      update.products = { menu: productMenu };
+      update.menus = productMenu;
     }
     if (Array.isArray(parsed.popular_times) && parsed.popular_times.length > 0) {
       update.popular_times = parsed.popular_times;

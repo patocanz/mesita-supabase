@@ -454,7 +454,7 @@ Deno.serve(async (req) => {
     google_stars_overall: details.rating ?? null,
     google_review_count: details.userRatingCount ?? null,
     // Real reviews straight from Google Place Details (up to 5). Qualitative
-    // profile fields (details{}, summary, menus, popular_times) are filled
+  // profile fields (details{}, summary, products, popular_times) are filled
     // separately by the atlas-enrich-profile agent after insert.
     google_reviews: mapGoogleReviews(details.reviews),
     editorial_summary: details.editorialSummary?.text ?? null,
@@ -509,7 +509,7 @@ Deno.serve(async (req) => {
   // the caller can't manage anything on it.
 
   // One-run completion: hand the fresh venue to the profile-enricher agent
-  // so the qualitative fields (details{}, summary, menus, popular times,
+  // so the qualitative fields (details{}, summary, products, popular times,
   // zone/city, established_year, executive_chef) land before we return.
   // Best-effort — the venue already exists; a failed/timed-out enrich just
   // leaves those nullable fields empty (admin-enrich-venue can re-run).
