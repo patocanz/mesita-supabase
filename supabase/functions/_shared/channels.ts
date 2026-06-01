@@ -236,3 +236,22 @@ export function pickWebsite(urls: string[]): string | null {
   }
   return null;
 }
+
+// First search result whose host maps to `channel` → canonical URL. For
+// directory / reservation / delivery channels (OpenTable, UberEats, …) any
+// path on the right host is acceptable — unlike Instagram/Facebook, which need
+// a profile-path check. Tracking junk is stripped via canonicaliseUrl.
+export function pickChannel(urls: string[], channel: ChannelKey): string | null {
+  for (const u of urls) {
+    const canon = canonicaliseUrl(u);
+    if (!canon) continue;
+    let host: string;
+    try {
+      host = new URL(canon).hostname;
+    } catch {
+      continue;
+    }
+    if (matchChannel(host) === channel) return canon;
+  }
+  return null;
+}
