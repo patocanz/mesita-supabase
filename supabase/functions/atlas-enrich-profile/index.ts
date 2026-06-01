@@ -39,6 +39,7 @@ import { firecrawlScrape, firecrawlSearch } from "../_shared/firecrawl.ts";
 import {
   domainOf,
   facebookPageFromUrl,
+  pickChannel,
   pickFacebook,
   pickInstagram,
   pickWebsite,
@@ -71,6 +72,10 @@ const QUALITY_MODEL: Record<string, string> = {
 // SERP) are all tier 2 in the Atlas catalog, so the whole social/website/SERP
 // layer is gated by ceiling >= 2.
 const SOCIAL_LAYER_TIER = 2;
+
+// OpenTable (reservations) + UberEats (delivery) link resolution is tier 3 in
+// the Atlas catalog, so it's gated by ceiling >= 3.
+const RESERVATION_DELIVERY_TIER = 3;
 
 // Hard ceiling on photos persisted to the venue, regardless of per-source caps.
 // Safety ceiling on the gathered candidate pool before save (the real,
@@ -174,6 +179,14 @@ const CHANNELS_SCHEMA = {
   },
 } as const;
 
+const DELIVERY_CHANNELS_SCHEMA = {
+  type: "object",
+  properties: {
+    opentable_url: { type: ["string", "null"] },
+    uber_eats_url: { type: ["string", "null"] },
+  },
+} as const;
+
 type ProfileResult = {
   zone?: string | null;
   city?: string | null;
@@ -271,6 +284,8 @@ Deno.serve(async (req) => {
   const costCapUsd = num(Number(cfg?.atlas_per_run_cost_cap_usd), 1.0) || 1.0;
   // Whole social/website layer runs only when the ceiling allows tier 2.
   const socialLayer = tierCeiling >= SOCIAL_LAYER_TIER;
+  // OpenTable + UberEats link resolution runs only when the ceiling allows tier 3.
+  const reservationDeliveryLayer = tierCeiling >= RESERVATION_DELIVERY_TIER;
 
   const PERPLEXITY_KEY = Deno.env.get("PERPLEXITY_KEY");
   const OPENAI_KEY = Deno.env.get("OPENAI_KEY");
@@ -309,6 +324,14 @@ Deno.serve(async (req) => {
     typeof row.website_url === "string" && row.website_url
       ? row.website_url
       : null;
+  let resolvedOpenTable =
+    typeof row.opentable_url === "string" && row.opentable_url
+      ? row.opentable_url
+      : null;
+  let resolvedUberEats =
+    typeof row.uber_eats_url === "string" && row.uber_eats_url
+      ? row.uber_eats_url
+      : null;
 
   // Synthesis is core — reserve it first so the profile always gets written.
   const synthCost =
@@ -321,7 +344,10 @@ Deno.serve(async (req) => {
   const needsDiscovery =
     socialLayer &&
     (!!FIRECRAWL_KEY || !!PERPLEXITY_KEY) &&
-    (!resolvedInstagram || !resolvedFacebook || !resolvedWebsite);
+    (!resolvedInstagram ||
+      !resolvedFacebook ||
+      !resolvedWebsite ||
+      (reservationDeliveryLayer && (!resolvedOpenTable || !resolvedUberEats)));
   const runDiscovery = needsDiscovery && reserve("discovery", COST.perplexity);
 
   if (runDiscovery) {
@@ -336,21 +362,30 @@ Deno.serve(async (req) => {
       city: (row.city as string | null) ?? null,
       locationLine: [row.address, row.city].filter(Boolean).join(", "),
       category: (row.category as string | null) ?? null,
+      resolveReservationDelivery: reservationDeliveryLayer,
       have: {
         instagram: resolvedInstagram,
         facebook: resolvedFacebook,
         website: resolvedWebsite,
+        opentable: resolvedOpenTable,
+        uberEats: resolvedUberEats,
       },
     });
     if (!resolvedInstagram && found.instagram_url) resolvedInstagram = found.instagram_url;
     if (!resolvedFacebook && found.facebook_url) resolvedFacebook = found.facebook_url;
     if (!resolvedWebsite && found.website_url) resolvedWebsite = found.website_url;
+    if (reservationDeliveryLayer) {
+      if (!resolvedOpenTable && found.opentable_url) resolvedOpenTable = found.opentable_url;
+      if (!resolvedUberEats && found.uber_eats_url) resolvedUberEats = found.uber_eats_url;
+    }
     sources.discovery = {
       ok: true,
       via: found.via,
       instagram: !!resolvedInstagram,
       facebook: !!resolvedFacebook,
       website: !!resolvedWebsite,
+      opentable: !!resolvedOpenTable,
+      ubereats: !!resolvedUberEats,
     };
   }
 
@@ -364,6 +399,14 @@ Deno.serve(async (req) => {
   }
   if (resolvedWebsite && resolvedWebsite !== row.website_url) {
     update.website_url = resolvedWebsite;
+  }
+  // OpenTable + UberEats are host-validated directory links (no per-venue
+  // identity check the way Instagram needs), so they persist straight away.
+  if (resolvedOpenTable && resolvedOpenTable !== row.opentable_url) {
+    update.opentable_url = resolvedOpenTable;
+  }
+  if (resolvedUberEats && resolvedUberEats !== row.uber_eats_url) {
+    update.uber_eats_url = resolvedUberEats;
   }
 
   const igHandle = instagramHandleFromUrl(resolvedInstagram);
@@ -1262,15 +1305,35 @@ async function resolveChannels(opts: {
   city: string | null;
   locationLine: string;
   category: string | null;
-  have: { instagram: string | null; facebook: string | null; website: string | null };
-}): Promise<Channels & { via: Record<string, string> }> {
+  // Tier-3 OpenTable + UberEats resolution is opt-in: the caller only flips
+  // this on when the venue's source-tier ceiling reaches 3.
+  resolveReservationDelivery?: boolean;
+  have: {
+    instagram: string | null;
+    facebook: string | null;
+    website: string | null;
+    opentable: string | null;
+    uberEats: string | null;
+  };
+}): Promise<
+  Channels & {
+    opentable_url: string | null;
+    uber_eats_url: string | null;
+    via: Record<string, string>;
+  }
+> {
   let instagram = opts.have.instagram;
   let facebook = opts.have.facebook;
   let website = opts.have.website;
+  let opentable = opts.have.opentable;
+  let uberEats = opts.have.uberEats;
+  const wantDelivery = opts.resolveReservationDelivery === true;
   const via: Record<string, string> = {};
   if (instagram) via.instagram = "google";
   if (facebook) via.facebook = "google";
   if (website) via.website = "google";
+  if (opentable) via.opentable = "seed";
+  if (uberEats) via.ubereats = "seed";
 
   const scope = [opts.name, opts.category ?? "", opts.city ?? ""]
     .map((s) => s.trim())
@@ -1299,10 +1362,24 @@ async function resolveChannels(opts: {
       `${scope} official website`,
       `${scope} website`,
     ];
-    const [igHits, fbHits, webHits] = await Promise.all([
+    const otQueries = [
+      `${scope} opentable`,
+      `${scope} opentable reservation`,
+      `${scope} reservaciones opentable`,
+    ];
+    const ueQueries = [
+      `${scope} uber eats`,
+      `${scope} ubereats`,
+      `${scope} uber eats a domicilio`,
+    ];
+    const needOpenTable = wantDelivery && !opentable;
+    const needUberEats = wantDelivery && !uberEats;
+    const [igHits, fbHits, webHits, otHits, ueHits] = await Promise.all([
       instagram ? Promise.resolve<string[]>([]) : searchMany(igQueries),
       facebook ? Promise.resolve<string[]>([]) : searchMany(fbQueries),
       website ? Promise.resolve<string[]>([]) : searchMany(webQueries),
+      needOpenTable ? searchMany(otQueries) : Promise.resolve<string[]>([]),
+      needUberEats ? searchMany(ueQueries) : Promise.resolve<string[]>([]),
     ]);
     if (!instagram) {
       const hit = pickInstagram(igHits);
@@ -1323,6 +1400,20 @@ async function resolveChannels(opts: {
       if (hit) {
         website = hit;
         via.website = "firecrawl";
+      }
+    }
+    if (needOpenTable) {
+      const hit = pickChannel(otHits, "opentable_url");
+      if (hit) {
+        opentable = hit;
+        via.opentable = "firecrawl";
+      }
+    }
+    if (needUberEats) {
+      const hit = pickChannel(ueHits, "uber_eats_url");
+      if (hit) {
+        uberEats = hit;
+        via.ubereats = "firecrawl";
       }
     }
   }
@@ -1351,7 +1442,36 @@ async function resolveChannels(opts: {
     }
   }
 
-  return { instagram_url: instagram, facebook_url: facebook, website_url: website, via };
+  // 3b. Perplexity fallback for the tier-3 directory links, mirroring the
+  // social fallback above. Separate call (distinct schema) so the social
+  // resolution above is never perturbed by it.
+  if (opts.perplexityKey && wantDelivery && (!opentable || !uberEats)) {
+    const dd = await discoverDeliveryPerplexity(
+      opts.perplexityKey,
+      opts.name,
+      opts.locationLine,
+      opts.category,
+    );
+    if (dd) {
+      if (!opentable && dd.opentable_url) {
+        opentable = dd.opentable_url;
+        via.opentable = "perplexity";
+      }
+      if (!uberEats && dd.uber_eats_url) {
+        uberEats = dd.uber_eats_url;
+        via.ubereats = "perplexity";
+      }
+    }
+  }
+
+  return {
+    instagram_url: instagram,
+    facebook_url: facebook,
+    website_url: website,
+    opentable_url: opentable,
+    uber_eats_url: uberEats,
+    via,
+  };
 }
 
 
@@ -1437,6 +1557,80 @@ async function discoverChannelsPerplexity(
     const website_url = validHost(answer.website_url, null);
     if (!instagram_url && !facebook_url && !website_url) return null;
     return { instagram_url, facebook_url, website_url };
+  } catch {
+    return null;
+  }
+}
+
+
+// Perplexity fallback for the tier-3 directory links (OpenTable reservations +
+// UberEats delivery). Same host-locked discipline as the social fallback:
+// every candidate — whether from the JSON answer or the mined citations — must
+// resolve to the right host via pickChannel before we trust it.
+async function discoverDeliveryPerplexity(
+  key: string,
+  name: string,
+  locationLine: string,
+  category: string | null,
+): Promise<{ opentable_url: string | null; uber_eats_url: string | null } | null> {
+  const prompt =
+    `Find where the venue "${name}"` +
+    (locationLine ? ` located at ${locationLine}` : "") +
+    (category ? ` (category: ${category})` : "") +
+    `. takes reservations and delivery. Return strict JSON with:\n` +
+    `- opentable_url: the canonical OpenTable restaurant page (opentable.com or ` +
+    `a country domain like opentable.com.mx). For a chain, the specific ` +
+    `location's page is best, but the brand page is acceptable. null if none.\n` +
+    `- uber_eats_url: the canonical Uber Eats store page (ubereats.com). For a ` +
+    `chain, the specific store is best, the brand page acceptable. null if none.\n` +
+    `Never invent a URL — use null when you truly find none.`;
+  try {
+    const r = await fetch(PERPLEXITY_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: PERPLEXITY_MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You resolve a venue's OpenTable and Uber Eats page URLs from web search. Output only valid JSON matching the schema. The specific location's page is best; a brand/chain page is acceptable. Use null only when you truly cannot find one. Never fabricate a URL.",
+          },
+          { role: "user", content: prompt },
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: { schema: DELIVERY_CHANNELS_SCHEMA },
+        },
+      }),
+    });
+    if (!r.ok) return null;
+    const data = (await r.json()) as {
+      choices?: { message?: { content?: string } }[];
+      citations?: unknown[];
+      search_results?: { url?: unknown }[];
+    };
+    const hitUrls: string[] = [];
+    for (const c of data.citations ?? []) {
+      if (typeof c === "string") hitUrls.push(c);
+    }
+    for (const s of data.search_results ?? []) {
+      if (s && typeof s.url === "string") hitUrls.push(s.url);
+    }
+    const answer = (safeParseJson(data.choices?.[0]?.message?.content ?? "") as
+      | { opentable_url?: unknown; uber_eats_url?: unknown }
+      | null) ?? {};
+    const opentable_url =
+      pickChannel([String(answer.opentable_url ?? "")], "opentable_url") ??
+      pickChannel(hitUrls, "opentable_url");
+    const uber_eats_url =
+      pickChannel([String(answer.uber_eats_url ?? "")], "uber_eats_url") ??
+      pickChannel(hitUrls, "uber_eats_url");
+    if (!opentable_url && !uber_eats_url) return null;
+    return { opentable_url, uber_eats_url };
   } catch {
     return null;
   }
