@@ -24,11 +24,26 @@ WEB_REPOS=(
 
 cd "$(dirname "$0")/.."
 
-echo "▶ Linking to project $PROJECT_REF…"
-supabase link --project-ref "$PROJECT_REF"
+# Supabase CLI reads project-root .env for config.toml env(TWILIO_*).
+bash scripts/sync-root-env.sh
 
-echo "▶ Pushing pending migrations…"
-supabase db push
+echo "▶ Linking to project ${PROJECT_REF} ..."
+supabase link --project-ref "${PROJECT_REF}"
+
+if [[ "${SKIP_DB_PUSH:-}" == "1" ]]; then
+  echo "▶ Skipping db push (SKIP_DB_PUSH=1)"
+else
+echo "▶ Pushing pending migrations ..."
+if ! supabase db push --include-all; then
+  echo ""
+  echo "⚠ db push failed (migration history drift)."
+  echo "  If production schema is already correct, run once:"
+  echo "    ./scripts/sync-migration-history.sh"
+  echo "  Then re-run ./scripts/deploy.sh"
+  echo "  Or skip push and only regen types: SKIP_DB_PUSH=1 ./scripts/deploy.sh"
+  exit 1
+fi
+fi
 
 for repo in "${WEB_REPOS[@]}"; do
   target="$repo/src/lib/supabase/database.types.ts"
@@ -41,4 +56,4 @@ for repo in "${WEB_REPOS[@]}"; do
 done
 
 echo ""
-echo "✓ Deploy complete."
+echo "OK Deploy complete."

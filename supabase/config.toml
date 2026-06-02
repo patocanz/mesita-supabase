@@ -214,6 +214,12 @@ verify_jwt = true
 [functions.consumer-submit-story]
 verify_jwt = true
 
+[functions.consumer-confirm-ticket-payment]
+verify_jwt = true
+
+[functions.consumer-submit-ticket-review]
+verify_jwt = true
+
 [functions.consumer-delete-account]
 verify_jwt = true
 
@@ -380,4 +386,15 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.stripe-handle-webhook]
+verify_jwt = false
+
+# --- Twilio (external webhooks) ---
+#
+# WhatsApp inbound + delivery status. Public at the gateway; security
+# is X-Twilio-Signature validation inside each EF (TWILIO_AUTH_TOKEN).
+
+[functions.twilio-whatsapp-inbound]
+verify_jwt = false
+
+[functions.twilio-whatsapp-status]
 verify_jwt = false

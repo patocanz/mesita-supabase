@@ -13,6 +13,7 @@ import {
   getAuthedUser,
   readEFEnv,
 } from "../_shared/auth.ts";
+import { normalizeConsumerCodeInput } from "../_shared/consumer-code.ts";
 
 type Body = { code?: string };
 
@@ -28,10 +29,11 @@ Deno.serve(async (req) => {
   const bodyRes = await readJson<Body>(req);
   if (!bodyRes.ok) return bodyRes.response;
   const body = bodyRes.body;
-  const code = (body.code ?? "").toString().trim().toUpperCase();
-  if (code.length < 4 || code.length > 12) {
-    return json({ ok: false, error: "Code must be 4-12 characters" }, 400);
+  const normalized = normalizeConsumerCodeInput((body.code ?? "").toString());
+  if (!normalized) {
+    return json({ ok: false, error: "Invalid consumer code format" }, 400);
   }
+  const code = normalized;
 
   const admin = adminClient(envRes.env);
 
