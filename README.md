@@ -77,12 +77,15 @@ supabase secrets set \
 
 `TWILIO_MESSAGE_SERVICE_SID` is also used by Supabase Auth SMS ([config.toml](supabase/config.toml)).
 
-**Local scripts** — copy [`.env.twilio.local.example`](.env.twilio.local.example) → `.env.twilio.local`:
+**Local scripts** — copy [`.env.twilio.local.example`](.env.twilio.local.example) → `.env.twilio.local`, then sync into project-root `.env` (Supabase CLI reads it for `config.toml`):
 
 ```bash
+./scripts/sync-root-env.sh                    # .env.twilio.local → .env (run after edits)
 ./scripts/setup-twilio-call-recording.sh      # voice → record-incoming TwiML
 ./scripts/sync-twilio-whatsapp-webhooks.sh    # WA senders → Supabase EFs
 ```
+
+`./scripts/deploy.sh` runs `sync-root-env.sh` automatically.
 
 **Deploy webhooks:**
 

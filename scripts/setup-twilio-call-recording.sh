@@ -5,10 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -f "${ROOT}/.env.twilio.local" ]]; then
-  # shellcheck disable=SC1091
-  set -a && source "${ROOT}/.env.twilio.local" && set +a
-fi
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/_load-local-env.sh"
 
 ACCOUNT_SID="${TWILIO_ACCOUNT_SID:?Set TWILIO_ACCOUNT_SID in .env.twilio.local}"
 AUTH_TOKEN="${TWILIO_AUTH_TOKEN:?Set TWILIO_AUTH_TOKEN in .env.twilio.local}"

@@ -5,10 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -f "${ROOT}/.env.twilio.local" ]]; then
-  # shellcheck disable=SC1091
-  set -a && source "${ROOT}/.env.twilio.local" && set +a
-fi
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/_load-local-env.sh"
 
 ACCOUNT_SID="${TWILIO_ACCOUNT_SID:?Set TWILIO_ACCOUNT_SID}"
 AUTH_TOKEN="${TWILIO_AUTH_TOKEN:?Set TWILIO_AUTH_TOKEN}"
@@ -28,7 +26,7 @@ for PHONE in "${PHONES[@]}"; do
   echo "→ ${WA}"
   # List senders and match by sender_id
   LIST=$(curl -sS -u "${ACCOUNT_SID}:${AUTH_TOKEN}" \
-    "https://messaging.twilio.com/v2/Channels/Senders?PageSize=100")
+    "https://messaging.twilio.com/v2/Channels/Senders?Channel=whatsapp&PageSize=100")
   SID=$(echo "$LIST" | PHONE="$WA" python3 -c "
 import json, os, sys
 want = os.environ['PHONE']
@@ -42,12 +40,9 @@ for s in json.load(sys.stdin).get('senders', []):
   fi
   HTTP=$(curl -sS -o /tmp/twilio-sender.json -w "%{http_code}" -u "${ACCOUNT_SID}:${AUTH_TOKEN}" \
     -X POST "https://messaging.twilio.com/v2/Channels/Senders/${SID}" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "Webhook.CallbackUrl=${INBOUND}" \
-    -d "Webhook.CallbackMethod=POST" \
-    -d "Webhook.StatusCallbackUrl=${STATUS}" \
-    -d "Webhook.StatusCallbackMethod=POST")
-  if [[ "${HTTP}" == "200" || "${HTTP}" == "201" ]]; then
+    -H "Content-Type: application/json" \
+    -d "{\"webhook\":{\"callback_url\":\"${INBOUND}\",\"callback_method\":\"POST\",\"status_callback_url\":\"${STATUS}\",\"status_callback_method\":\"POST\"}}")
+  if [[ "${HTTP}" == "200" || "${HTTP}" == "201" || "${HTTP}" == "202" ]]; then
     echo "    ✓ webhooks updated (${SID})"
   else
     echo "    ✗ HTTP ${HTTP}" >&2
