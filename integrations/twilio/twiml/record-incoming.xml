@@ -1,0 +1,5 @@
+<Response>
+  <Say voice="alice">This call may be recorded.</Say>
+  <Record transcribe="true" maxLength="300" playBeep="false" timeout="15"/>
+  <Hangup/>
+</Response>

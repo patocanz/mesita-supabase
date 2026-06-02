@@ -13,6 +13,7 @@ import {
   readEFEnv,
   requireMembership,
 } from "../_shared/auth.ts";
+import { readTwilioEnv, sendWhatsAppText } from "../_shared/twilio.ts";
 
 type Body = {
   venueId?: string;
@@ -44,6 +45,32 @@ Deno.serve(async (req) => {
   const admin = adminClient(envRes.env);
   const membership = await requireMembership(admin, authRes.user, venueId);
   if (!membership.ok) return membership.response;
+
+  if (channel === "whatsapp") {
+    const twilio = readTwilioEnv();
+    if (twilio.ok) {
+      const send = await sendWhatsAppText({
+        env: twilio.env,
+        from: twilio.env.whatsappFromStaff,
+        to: phone,
+        body: "Mesita test — your WhatsApp channel is connected.",
+      });
+      if (send.ok) {
+        return json({
+          ok: true,
+          channel,
+          to: phone,
+          sent: true,
+          mock: false,
+          messageSid: send.sid,
+        });
+      }
+      return json(
+        { ok: false, error: send.error, channel, to: phone },
+        502,
+      );
+    }
+  }
 
   return json({
     ok: true,
